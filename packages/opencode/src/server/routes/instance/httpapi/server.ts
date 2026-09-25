@@ -28,6 +28,7 @@ import { Vcs } from "@/project/vcs"
 import { ProviderAuth } from "@/provider/auth"
 import { Provider } from "@/provider/provider"
 import { Question } from "@/question"
+import { ModelPick } from "@/modelpick"
 import { SessionCompaction } from "@/session/compaction"
 import { Instruction } from "@/session/instruction"
 import { LLM } from "@/session/llm"
@@ -96,6 +97,7 @@ import { projectCopyHandlers } from "./handlers/project-copy"
 import { providerHandlers } from "./handlers/provider"
 import { ptyConnectHandlers, ptyHandlers } from "./handlers/pty"
 import { questionHandlers } from "./handlers/question"
+import { modelpickHandlers } from "./handlers/model-pick"
 import { sessionHandlers } from "./handlers/session"
 import { syncHandlers } from "./handlers/sync"
 import { tuiHandlers } from "./handlers/tui"
@@ -162,6 +164,7 @@ const instanceApiRoutes = HttpApiBuilder.layer(InstanceHttpApi).pipe(
     projectCopyHandlers,
     ptyHandlers,
     questionHandlers,
+    modelpickHandlers,
     permissionHandlers,
     providerHandlers,
     sessionHandlers,
@@ -231,6 +234,7 @@ const app = LayerNode.group([
   Question.node,
   Permission.node,
   PermissionSaved.node,
+  ModelPick.node,
   Todo.node,
   Session.node,
   SessionProjector.node,

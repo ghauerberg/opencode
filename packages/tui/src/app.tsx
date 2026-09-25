@@ -1078,6 +1078,44 @@ function App(props: { onSnapshot?: () => Promise<string[]>; pluginHost: TuiPlugi
     void exit()
   })
 
+  event.on("modelpick.asked", (evt, { workspace }) => {
+    if (workspace !== project.workspace.current()) return
+    const request = evt.properties
+    const role = request.role
+    let replied = false
+
+    const reject = () => {
+      if (replied) return
+      replied = true
+      void sdk.client.modelpick.reject({
+        requestID: request.id,
+        directory: sdk.directory,
+        workspace: project.workspace.current(),
+      })
+    }
+
+    dialog.replace(
+      () => (
+        <DialogModel
+          title={`Select model for ${role}`}
+          onSelect={(selection) => {
+            replied = true
+            void sdk.client.modelpick.reply({
+              requestID: request.id,
+              modelPickReplyPayload: {
+                providerID: selection.providerID,
+                modelID: selection.modelID,
+              },
+              directory: sdk.directory,
+              workspace: project.workspace.current(),
+            })
+          }}
+        />
+      ),
+      reject,
+    )
+  })
+
   const plugin = createMemo(() => {
     if (!ready()) return
     if (route.data.type !== "plugin") return

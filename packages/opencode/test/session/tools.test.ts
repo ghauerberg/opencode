@@ -14,6 +14,7 @@ import { Tool } from "@/tool/tool"
 import { ToolRegistry } from "@/tool/registry"
 import { Truncate } from "@/tool/truncate"
 import { Plugin } from "@/plugin"
+import { Advisor } from "@/advisor"
 import { RuntimeFlags } from "@/effect/runtime-flags"
 import { Effect, Layer, Schema } from "effect"
 import { testEffect } from "../lib/effect"
@@ -61,11 +62,23 @@ const fakeTruncate = Truncate.Service.of({
   limits: () => Effect.succeed({ maxLines: 2000, maxBytes: 50 * 1024 }),
 } satisfies Truncate.Interface)
 
+const fakeAdvisor = Advisor.Service.of({
+  runAdvisorReview: () => Effect.die("unused"),
+  step: () => Effect.void,
+  reset: () => Effect.void,
+  getState: () => Effect.succeed({ steps: 0, cycle: 0, history: [], advisorRunning: false }),
+  maybeAutoReview: () => Effect.succeed(false),
+  getConfiguredModel: () => Effect.succeed(undefined),
+  setConfiguredModel: () => Effect.void,
+  askConfiguredModel: () => Effect.succeed(undefined),
+} satisfies Advisor.Interface)
+
 const layer = Layer.mergeAll(
   Layer.succeed(Plugin.Service, fakePlugin),
   Layer.succeed(Permission.Service, fakePermission),
   Layer.succeed(MCP.Service, fakeMcp()),
   Layer.succeed(Truncate.Service, fakeTruncate),
+  Layer.succeed(Advisor.Service, fakeAdvisor),
   RuntimeFlags.layer(),
   Layer.succeed(
     ToolRegistry.Service,

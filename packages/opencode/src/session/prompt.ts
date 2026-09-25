@@ -56,6 +56,7 @@ import { SessionTable } from "@opencode-ai/core/session/sql"
 import { SessionReminders } from "./reminders"
 import { SessionTools } from "./tools"
 import { LLMEvent } from "@opencode-ai/llm"
+import { Advisor } from "@/advisor"
 
 // @ts-ignore
 globalThis.AI_SDK_LOG_WARNINGS = false
@@ -140,6 +141,7 @@ const layer = Layer.effect(
     const events = yield* EventV2Bridge.Service
     const flags = yield* RuntimeFlags.Service
     const database = yield* Database.Service
+    const advisor = yield* Advisor.Service
     const { db } = database
     const ops = Effect.fn("SessionPrompt.ops")(function* () {
       return {
@@ -303,6 +305,12 @@ const layer = Layer.effect(
         description: task.description,
         subagent_type: task.agent,
         command: task.command,
+        // The /advisor command lets the user pin a model for advice; forward it
+        // so the advisor subagent uses the persisted override. Other subtasks
+        // keep the task tool's normal agent-model resolution.
+        ...(task.command === Command.Default.ADVISOR && task.model
+          ? { model: { providerID: task.model.providerID, modelID: task.model.modelID } }
+          : {}),
       }
       yield* plugin.trigger(
         "tool.execute.before",
@@ -1089,13 +1097,25 @@ const layer = Layer.effect(
           yield* status.set(sessionID, { type: "busy" })
           yield* Effect.logInfo("loop", { "session.id": sessionID, step })
 
-          let msgs = yield* MessageV2.filterCompactedEffect(sessionID).pipe(
-            Effect.provideService(Database.Service, database),
-          )
+          const fullHistory = session.metadata?.[Advisor.FULL_HISTORY_METADATA_KEY] === true
+          let msgs = yield* (
+            fullHistory ? MessageV2.stream(sessionID) : MessageV2.filterCompactedEffect(sessionID)
+          ).pipe(Effect.provideService(Database.Service, database))
 
           const { user: lastUser, assistant: lastAssistant, finished: lastFinished, tasks } = MessageV2.latest(msgs)
 
           if (!lastUser) throw new Error("No user message found in stream. This should never happen.")
+
+          // Advisor auto-review checkpoint: when the counted step allowance is
+          // reached, run the advisor synchronously (blocking the loop) and inject
+          // the advice as a synthetic message before the next model turn, so the
+          // main session genuinely pauses until the review completes.
+          const promptOps = yield* ops()
+          if (
+            yield* advisor.maybeAutoReview({ sessionID, agent: session.agent ?? "", model: lastUser.model, promptOps })
+          ) {
+            continue
+          }
 
           const lastAssistantMsg = msgs.findLast(
             (msg) => msg.info.role === "assistant" && msg.info.id === lastAssistant?.id,
@@ -1139,7 +1159,7 @@ const layer = Layer.effect(
             }).pipe(Effect.ignore, Effect.forkIn(scope))
 
           const model = yield* getModel(lastUser.model.providerID, lastUser.model.modelID, sessionID)
-          const task = tasks.pop()
+          const task = fullHistory ? undefined : tasks.pop()
 
           if (task?.type === "subtask") {
             yield* handleSubtask({ task, model, lastUser, sessionID, session, msgs })
@@ -1159,6 +1179,7 @@ const layer = Layer.effect(
           }
 
           if (
+            !fullHistory &&
             lastFinished &&
             lastFinished.summary !== true &&
             (yield* compaction.isOverflow({ tokens: lastFinished.tokens, model }))
@@ -1238,6 +1259,7 @@ const layer = Layer.effect(
               Effect.provideService(MCP.Service, mcp),
               Effect.provideService(Truncate.Service, truncate),
               Effect.provideService(RuntimeFlags.Service, flags),
+              Effect.provideService(Advisor.Service, advisor),
             )
 
             if (lastUser.format?.type === "json_schema") {
@@ -1318,6 +1340,14 @@ const layer = Layer.effect(
 
             if (result === "stop") return "break" as const
             if (result === "compact") {
+              if (fullHistory) {
+                handle.message.error = new SessionV1.ContextOverflowError({
+                  message: "Advisor full-history review exceeded the model context window; no history was truncated.",
+                }).toObject()
+                handle.message.finish = "error"
+                yield* sessions.updateMessage(handle.message)
+                return "break" as const
+              }
               yield* compaction.create({
                 sessionID,
                 agent: lastUser.agent,
@@ -1408,7 +1438,96 @@ const layer = Layer.effect(
       }
       template = template.trim()
 
+      if (input.command === Command.Default.ADVISOR || input.command === Command.Default.ADVISE) {
+        const parent = yield* sessions.get(input.sessionID).pipe(Effect.orDie)
+        const review = yield* advisor
+          .runAdvisorReview({
+            sessionID: input.sessionID,
+            trigger: "user",
+            reason: input.arguments.trim() || undefined,
+            promptOps: yield* ops(),
+          })
+          .pipe(Effect.orDie)
+        const result = yield* Advisor.injectAdvice({
+          sessionID: input.sessionID,
+          agent: parent.agent ?? (yield* agents.defaultInfo()).name,
+          model: {
+            providerID: ProviderV2.ID.make(parent.model?.providerID ?? "unknown"),
+            modelID: ModelV2.ID.make(parent.model?.id ?? "unknown"),
+          },
+          review,
+        }).pipe(Effect.provideService(Session.Service, sessions))
+        yield* events.publish(Command.Event.Executed, {
+          name: input.command,
+          sessionID: input.sessionID,
+          arguments: input.arguments,
+          messageID: result.id,
+        })
+        return yield* MessageV2.get({ sessionID: input.sessionID, messageID: result.id }).pipe(
+          Effect.provideService(Database.Service, database),
+          Effect.orDie,
+        )
+      }
+
+      if (input.command === Command.Default.ADVISOR_MODEL) {
+        const parent = yield* sessions.get(input.sessionID).pipe(Effect.orDie)
+        const arg = input.arguments.trim()
+        const current = yield* advisor.getConfiguredModel(input.sessionID)
+
+        let text: string
+        if (arg === "default" || arg === "reset") {
+          yield* advisor.setConfiguredModel({ sessionID: input.sessionID, model: undefined })
+          text = "Advisor model reset to the agent's default."
+        } else if (arg) {
+          const parsed = Provider.parseModel(arg)
+          yield* advisor.setConfiguredModel({ sessionID: input.sessionID, model: parsed })
+          text = `Advisor model set to ${parsed.providerID}/${parsed.modelID}.`
+        } else {
+          // No argument: open the model picker and save the selection.
+          const picked = yield* advisor.askConfiguredModel({ sessionID: input.sessionID })
+          text = picked
+            ? `Advisor model set to ${picked.providerID}/${picked.modelID}.`
+            : current
+              ? `Advisor model unchanged (${current.providerID}/${current.modelID}); picker dismissed.`
+              : "Advisor model unchanged; picker dismissed."
+        }
+
+        const msg: SessionV1.User = yield* sessions.updateMessage({
+          id: MessageID.ascending(),
+          sessionID: input.sessionID,
+          role: "user",
+          time: { created: Date.now() },
+          agent: parent.agent ?? (yield* agents.defaultInfo()).name,
+          model: {
+            providerID: ProviderV2.ID.make(parent.model?.providerID ?? "unknown"),
+            modelID: ModelV2.ID.make(parent.model?.id ?? "unknown"),
+          },
+        })
+        yield* sessions.updatePart({
+          id: PartID.ascending(),
+          messageID: msg.id,
+          sessionID: input.sessionID,
+          type: "text",
+          text,
+          synthetic: true,
+        } satisfies SessionV1.TextPart)
+        yield* events.publish(Command.Event.Executed, {
+          name: input.command,
+          sessionID: input.sessionID,
+          arguments: input.arguments,
+          messageID: msg.id,
+        })
+        return yield* MessageV2.get({ sessionID: input.sessionID, messageID: msg.id }).pipe(
+          Effect.provideService(Database.Service, database),
+          Effect.orDie,
+        )
+      }
+
       const taskModel = yield* Effect.gen(function* () {
+        if (input.command === Command.Default.ADVISOR) {
+          const configured = yield* advisor.getConfiguredModel(input.sessionID)
+          if (configured) return configured
+        }
         if (cmd.model) return Provider.parseModel(cmd.model)
         if (cmd.agent) {
           const cmdAgent = yield* agents.get(cmd.agent)
@@ -1608,6 +1727,7 @@ export const node = LayerNode.make({
     Plugin.node,
     Command.node,
     Config.node,
+    Advisor.node,
     Permission.node,
     FSUtil.node,
     MCP.node,

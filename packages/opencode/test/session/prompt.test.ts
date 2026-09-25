@@ -6,7 +6,7 @@ import { SessionProjector } from "@opencode-ai/core/session/projector"
 import { eq } from "drizzle-orm"
 import { EventV2Bridge } from "@/event-v2-bridge"
 import { expect } from "bun:test"
-import { Cause, Deferred, Duration, Effect, Exit, Fiber, Layer } from "effect"
+import { Cause, Deferred, Duration, Effect, Exit, Fiber, Layer, Queue } from "effect"
 import path from "path"
 import { fileURLToPath } from "url"
 import { NamedError } from "@opencode-ai/core/util/error"
@@ -57,6 +57,8 @@ import { RuntimeFlags } from "@/effect/runtime-flags"
 import { ProviderV2 } from "@opencode-ai/core/provider"
 import { ModelV2 } from "@opencode-ai/core/model"
 import { LocationServiceMap, locationServiceMapLayer } from "@opencode-ai/core/location-services"
+import { ModelPick } from "@/modelpick"
+import { Advisor } from "@/advisor"
 
 const summary = Layer.succeed(
   SessionSummary.Service,
@@ -206,6 +208,8 @@ const promptRoot = LayerNode.group([
   SystemPrompt.node,
   CrossSpawnSpawner.node,
   RuntimeFlags.node,
+  Advisor.node,
+  ModelPick.node,
 ])
 
 function makePrompt(input?: { mcpInstructions?: MCP.ServerInstructions[]; processor?: "blocking" }) {
@@ -2465,6 +2469,274 @@ noLLMServer.instance(
           expect(err.data.message).toContain("init")
         }
       }
+    }),
+  30_000,
+)
+
+noLLMServer.instance(
+  "/advisormodel opens the model picker and persists the selected model",
+  () =>
+    Effect.gen(function* () {
+      const prompt = yield* SessionPrompt.Service
+      const sessions = yield* Session.Service
+      const modelpick = yield* ModelPick.Service
+      const advisor = yield* Advisor.Service
+      const events = yield* EventV2Bridge.Service
+      const session = yield* sessions.create({})
+
+      const asked = yield* Queue.unbounded<ModelPick.Request>()
+      const off = yield* events.listen((event) => {
+        if (event.type === ModelPick.Event.Asked.type) Queue.offerUnsafe(asked, event.data as ModelPick.Request)
+        return Effect.void
+      })
+      yield* Effect.addFinalizer(() => off)
+
+      const fiber = yield* prompt
+        .command({ sessionID: session.id, command: "advisormodel", arguments: "" })
+        .pipe(Effect.forkScoped)
+
+      const request = yield* Queue.take(asked).pipe(Effect.timeout("2 seconds"))
+      expect(request?.role).toBe("advisor")
+
+      yield* modelpick.reply({
+        requestID: request.id,
+        answer: { providerID: "picker-prov", modelID: "picker-model" },
+      })
+
+      const result = yield* Fiber.join(fiber)
+      expect(result.info.role).toBe("user")
+      const text = result.parts.find((part) => part.type === "text")
+      expect(text?.type === "text" ? text.text : "").toContain("Advisor model set to picker-prov/picker-model")
+
+      const configured = yield* advisor.getConfiguredModel(session.id)
+      expect(configured).toEqual({
+        providerID: ProviderV2.ID.make("picker-prov"),
+        modelID: ModelV2.ID.make("picker-model"),
+      })
+    }),
+  30_000,
+)
+
+noLLMServer.instance(
+  "/advisormodel default resets the persisted advisor model",
+  () =>
+    Effect.gen(function* () {
+      const prompt = yield* SessionPrompt.Service
+      const sessions = yield* Session.Service
+      const advisor = yield* Advisor.Service
+      const session = yield* sessions.create({})
+
+      yield* advisor.setConfiguredModel({
+        sessionID: session.id,
+        model: { providerID: "picker-prov", modelID: "picker-model" },
+      })
+
+      const result = yield* prompt.command({
+        sessionID: session.id,
+        command: "advisormodel",
+        arguments: "default",
+      })
+      expect(result.info.role).toBe("user")
+      expect(yield* advisor.getConfiguredModel(session.id)).toBeUndefined()
+    }),
+  30_000,
+)
+
+it.instance(
+  "/advise gives the fork pre-compaction history and returns only the final advice",
+  () =>
+    Effect.gen(function* () {
+      const { llm } = yield* useServerConfig((url) => providerCfg(url))
+      const prompt = yield* SessionPrompt.Service
+      const sessions = yield* Session.Service
+      const parent = yield* sessions.create({
+        title: "Full-history advisor",
+        agent: "build",
+        model: { id: ref.modelID, providerID: ref.providerID },
+      })
+      const early = yield* user(parent.id, "Important early constraint: component X must remain backwards compatible.")
+      const earlyAssistant = yield* sessions.updateMessage({
+        id: MessageID.ascending(),
+        parentID: early.id,
+        role: "assistant",
+        sessionID: parent.id,
+        mode: "build",
+        agent: "build",
+        cost: 0,
+        path: { cwd: "/tmp", root: "/tmp" },
+        tokens: { input: 0, output: 0, reasoning: 0, cache: { read: 0, write: 0 } },
+        modelID: ref.modelID,
+        providerID: ref.providerID,
+        time: { created: Date.now() },
+        finish: "stop",
+      })
+      yield* sessions.updatePart({
+        id: PartID.ascending(),
+        messageID: earlyAssistant.id,
+        sessionID: parent.id,
+        type: "text",
+        text: "Understood.",
+      })
+      const tail = yield* user(parent.id, `Later investigation: ${"unrelated detail ".repeat(80)}`)
+      const tailAssistant = yield* sessions.updateMessage({
+        id: MessageID.ascending(),
+        parentID: tail.id,
+        role: "assistant",
+        sessionID: parent.id,
+        mode: "build",
+        agent: "build",
+        cost: 0,
+        path: { cwd: "/tmp", root: "/tmp" },
+        tokens: { input: 0, output: 0, reasoning: 0, cache: { read: 0, write: 0 } },
+        modelID: ref.modelID,
+        providerID: ref.providerID,
+        time: { created: Date.now() },
+        finish: "stop",
+      })
+      yield* sessions.updatePart({
+        id: PartID.ascending(),
+        messageID: tailAssistant.id,
+        sessionID: parent.id,
+        type: "text",
+        text: "More recent work; the old compatibility constraint is absent from this summary.",
+      })
+      yield* Effect.forEach(
+        Array.from({ length: 24 }, (_, index) => index),
+        (index) =>
+          Effect.gen(function* () {
+            const investigation = yield* user(
+              parent.id,
+              `Unrelated investigation turn ${index}: ${"background action detail ".repeat(30)}`,
+            )
+            const assistant = yield* sessions.updateMessage({
+              id: MessageID.ascending(),
+              parentID: investigation.id,
+              role: "assistant",
+              sessionID: parent.id,
+              mode: "build",
+              agent: "build",
+              cost: 0,
+              path: { cwd: "/tmp", root: "/tmp" },
+              tokens: { input: 0, output: 0, reasoning: 0, cache: { read: 0, write: 0 } },
+              modelID: ref.modelID,
+              providerID: ref.providerID,
+              time: { created: Date.now() },
+              finish: "stop",
+            })
+            yield* sessions.updatePart({
+              id: PartID.ascending(),
+              messageID: assistant.id,
+              sessionID: parent.id,
+              type: "text",
+              text: `Follow-up investigation result ${index}: ${"checked another subsystem ".repeat(20)}`,
+            })
+          }),
+      )
+      const compaction = yield* sessions.updateMessage({
+        id: MessageID.ascending(),
+        role: "user",
+        sessionID: parent.id,
+        agent: "build",
+        model: ref,
+        time: { created: Date.now() },
+      })
+      yield* sessions.updatePart({
+        id: PartID.ascending(),
+        messageID: compaction.id,
+        sessionID: parent.id,
+        type: "compaction",
+        auto: true,
+        tail_start_id: tail.id,
+      })
+      const summary = yield* sessions.updateMessage({
+        id: MessageID.ascending(),
+        parentID: compaction.id,
+        role: "assistant",
+        sessionID: parent.id,
+        mode: "build",
+        agent: "build",
+        cost: 0,
+        path: { cwd: "/tmp", root: "/tmp" },
+        tokens: { input: 0, output: 0, reasoning: 0, cache: { read: 0, write: 0 } },
+        modelID: ref.modelID,
+        providerID: ref.providerID,
+        time: { created: Date.now() },
+        finish: "stop",
+        summary: true,
+      })
+      yield* sessions.updatePart({
+        id: PartID.ascending(),
+        messageID: summary.id,
+        sessionID: parent.id,
+        type: "text",
+        text: "Compacted summary: implementation is underway; continue reviewing the latest changes.",
+      })
+      yield* user(parent.id, "We are now considering changing component X.")
+
+      const persisted = yield* sessions.messages({ sessionID: parent.id })
+      expect(
+        JSON.stringify(MessageV2.filterCompacted([...persisted].reverse())).includes(
+          "component X must remain backwards compatible",
+        ),
+      ).toBe(false)
+      const parentMessageCount = persisted.length
+
+      yield* llm.text(
+        "Preserve the early backwards-compatibility constraint on component X. Check compatibility before changing it.",
+      )
+      const result = yield* prompt.command({
+        sessionID: parent.id,
+        command: "advise",
+        arguments: "Should component X be changed?",
+      })
+      const inputs = yield* llm.inputs
+      const advisorInput = inputs.find((input) =>
+        JSON.stringify(input.messages).includes("component X must remain backwards compatible"),
+      )
+      expect(advisorInput).toBeDefined()
+      const sentMessages = JSON.stringify(advisorInput?.messages)
+      expect(sentMessages).toContain("Should component X be changed?")
+      expect(sentMessages).toContain("unrelated detail")
+      expect(sentMessages).toContain("Unrelated investigation turn 23")
+      expect(sentMessages).toContain("Compacted summary")
+      expect(sentMessages).toContain("What did we do so far?")
+      const resultText = result.parts.find((part) => part.type === "text")
+      expect(resultText?.type === "text" ? resultText.text : "").toContain("backwards-compatibility constraint")
+      expect(yield* sessions.children(parent.id)).toHaveLength(0)
+      expect(yield* sessions.messages({ sessionID: parent.id })).toHaveLength(parentMessageCount + 1)
+    }),
+  30_000,
+)
+
+it.instance(
+  "/advise reports full-history context overflow without compacting",
+  () =>
+    Effect.gen(function* () {
+      const { llm } = yield* useServerConfig((url) => providerCfg(url))
+      const prompt = yield* SessionPrompt.Service
+      const sessions = yield* Session.Service
+      const parent = yield* sessions.create({
+        title: "Full-history overflow",
+        agent: "build",
+        model: { id: ref.modelID, providerID: ref.providerID },
+      })
+      yield* user(parent.id, "The full conversation must remain available to the advisor.")
+      yield* llm.error(413, { error: { message: "request entity too large" } })
+
+      const result = yield* prompt.command({
+        sessionID: parent.id,
+        command: "advise",
+        arguments: "Review everything so far.",
+      })
+      const advice = result.parts.find((part) => part.type === "text")
+      expect(advice?.type === "text" ? advice.text : "").toContain("Full-history Advisor review unavailable")
+      expect(advice?.type === "text" ? advice.text : "").toContain("No conversation history was truncated")
+      expect(yield* sessions.children(parent.id)).toHaveLength(0)
+      expect(
+        (yield* sessions.messages({ sessionID: parent.id })).some((message) =>
+          message.parts.some((part) => part.type === "compaction"),
+        ),
+      ).toBe(false)
     }),
   30_000,
 )

@@ -1,5 +1,7 @@
 import { describe, expect, test } from "bun:test"
 import { Result, Schema } from "effect"
+import { ModelV2 } from "@opencode-ai/core/model"
+import { ProviderV2 } from "@opencode-ai/core/provider"
 import { ToolJsonSchema } from "../../src/tool/json-schema"
 
 // Each tool exports its parameters schema at module scope so this test can
@@ -10,6 +12,7 @@ import { ToolJsonSchema } from "../../src/tool/json-schema"
 // provider-compatible while tools use Effect Schema internally.
 
 import { Parameters as ApplyPatch } from "../../src/tool/apply_patch"
+import { Parameters as Consult } from "../../src/tool/consult"
 import { Parameters as Edit } from "../../src/tool/edit"
 import { Parameters as Glob } from "../../src/tool/glob"
 import { Parameters as Grep } from "../../src/tool/grep"
@@ -38,6 +41,7 @@ describe("tool parameters", () => {
   describe("JSON Schema (wire shape)", () => {
     test("apply_patch", () => expect(toJsonSchema(ApplyPatch)).toMatchSnapshot())
     test("bash", () => expect(toJsonSchema(Shell)).toMatchSnapshot())
+    test("consult", () => expect(toJsonSchema(Consult)).toMatchSnapshot())
     test("edit", () => expect(toJsonSchema(Edit)).toMatchSnapshot())
     test("glob", () => expect(toJsonSchema(Glob)).toMatchSnapshot())
     test("grep", () => expect(toJsonSchema(Grep)).toMatchSnapshot())
@@ -102,6 +106,35 @@ describe("tool parameters", () => {
     })
     test("rejects non-string patchText", () => {
       expect(accepts(ApplyPatch, { patchText: 123 })).toBe(false)
+    })
+  })
+
+  describe("consult", () => {
+    test("accepts a full escalation packet", () => {
+      const parsed = parse(Consult, {
+        role: "architect",
+        subproblem: "mobile nav overlap",
+        confidence: 0.22,
+        explanation: "fails at 390px",
+        attempted: ["changed z-index"],
+        blocker: "overlap persists",
+        question: "which boundary owns mobile nav?",
+        evidence: {
+          url: "http://localhost:3000",
+          viewport: "390x844",
+          screenshots: ["shot.png"],
+          consoleErrors: ["TypeError"],
+        },
+      })
+      expect(parsed.confidence).toBe(0.22)
+      expect(parsed.evidence?.screenshots).toEqual(["shot.png"])
+    })
+    test("rejects missing role", () => {
+      expect(accepts(Consult, { subproblem: "x", confidence: 0.5, question: "q" })).toBe(false)
+    })
+    test("rejects confidence out of range", () => {
+      expect(accepts(Consult, { role: "architect", subproblem: "x", confidence: 1.5, question: "q" })).toBe(false)
+      expect(accepts(Consult, { role: "architect", subproblem: "x", confidence: -0.1, question: "q" })).toBe(false)
     })
   })
 
@@ -242,6 +275,18 @@ describe("tool parameters", () => {
     test("accepts optional background flag", () => {
       const parsed = parse(Task, { description: "d", prompt: "p", subagent_type: "general", background: true })
       expect(parsed.background).toBe(true)
+    })
+    test("accepts an optional model override", () => {
+      const parsed = parse(Task, {
+        description: "d",
+        prompt: "p",
+        subagent_type: "general",
+        model: { providerID: ProviderV2.ID.make("provider"), modelID: ModelV2.ID.make("model") },
+      })
+      expect(parsed.model).toEqual({
+        providerID: ProviderV2.ID.make("provider"),
+        modelID: ModelV2.ID.make("model"),
+      })
     })
     test("rejects missing prompt", () => {
       expect(accepts(Task, { description: "d", subagent_type: "general" })).toBe(false)
