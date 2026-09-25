@@ -111,6 +111,11 @@ export const {
       }
       formatter: FormatterStatus[]
       vcs: VcsInfo | undefined
+      bench: {
+        id: string
+        name: string
+        scores: Record<string, number>
+      }[]
     }>({
       provider_next: {
         all: [],
@@ -141,6 +146,7 @@ export const {
       mcp_resource: {},
       formatter: [],
       vcs: undefined,
+      bench: [],
     })
 
     const event = useEvent()
@@ -531,7 +537,22 @@ export const {
               setStore("session_status", reconcile(x.data ?? {}))
             }),
             sdk.client.provider.auth({ workspace }).then((x) => setStore("provider_auth", reconcile(x.data ?? {}))),
-            sdk.client.vcs.get({ workspace }).then((x) => setStore("vcs", reconcile(x.data))),
+            sdk.client.vcs.get({ workspace }).then((x) => setStore("vcs", x.data)),
+            sdk.client.v2.model
+              .bench(undefined, { throwOnError: true })
+              .then((x) => {
+                setStore(
+                  "bench",
+                  x.data.data.map((bench) => ({
+                    id: bench.id,
+                    name: bench.name,
+                    scores: Object.fromEntries(
+                      Object.entries(bench.scores).filter((pair): pair is [string, number] => typeof pair[1] === "number"),
+                    ),
+                  })),
+                )
+              })
+              .catch(() => undefined),
             project.workspace.sync(),
           ]).then(() => {
             setStore("status", "complete")

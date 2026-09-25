@@ -153,12 +153,14 @@ export const { use: useLocal, provider: LocalProvider } = createSimpleContext({
           modelID: string
         }[]
         variant: Record<string, string | undefined>
+        bench: string | undefined
       }>({
         ready: false,
         model: {},
         recent: [],
         favorite: [],
         variant: {},
+        bench: undefined,
       })
 
       const filePath = path.join(paths.state, "model.json")
@@ -176,6 +178,7 @@ export const { use: useLocal, provider: LocalProvider } = createSimpleContext({
           recent: modelStore.recent,
           favorite: modelStore.favorite,
           variant: modelStore.variant,
+          bench: modelStore.bench,
         })
       }
 
@@ -187,6 +190,7 @@ export const { use: useLocal, provider: LocalProvider } = createSimpleContext({
           if (Array.isArray(value.favorite)) setModelStore("favorite", value.favorite)
           if (typeof value.variant === "object" && value.variant !== null)
             setModelStore("variant", value.variant as Record<string, string | undefined>)
+          if (typeof value.bench === "string") setModelStore("bench", value.bench)
         })
         .catch(() => {})
         .finally(() => {
@@ -254,6 +258,15 @@ export const { use: useLocal, provider: LocalProvider } = createSimpleContext({
         },
         favorite() {
           return modelStore.favorite
+        },
+        bench() {
+          return modelStore.bench
+        },
+        setBench(value: string | undefined) {
+          batch(() => {
+            setModelStore("bench", value ?? undefined)
+            save()
+          })
         },
         parsed: createMemo(() => {
           const value = currentModel()

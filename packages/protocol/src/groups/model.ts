@@ -21,6 +21,29 @@ export const ModelGroup = HttpApiGroup.make("server.model")
         }),
       ),
   )
+  .add(
+    HttpApiEndpoint.get("model.bench", "/api/model/bench", {
+      query: LocationQuery,
+      success: Location.response(
+        Schema.Array(
+          Schema.Struct({
+            id: Schema.String,
+            name: Schema.String,
+            scores: Schema.Record(Schema.String, Schema.Number),
+          }),
+        ),
+      ),
+      error: ServiceUnavailableError,
+    })
+      .annotateMerge(locationQueryOpenApi)
+      .annotateMerge(
+        OpenApi.annotations({
+          identifier: "v2.model.bench",
+          summary: "List model benchmarks",
+          description: "Retrieve benchmark leaderboard scores for models, indexed by model ID.",
+        }),
+      ),
+  )
   .annotateMerge(
     OpenApi.annotations({
       title: "models",

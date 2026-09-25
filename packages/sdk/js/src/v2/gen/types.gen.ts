@@ -12075,6 +12075,53 @@ export type V2ModelListResponses = {
 
 export type V2ModelListResponse = V2ModelListResponses[keyof V2ModelListResponses]
 
+export type V2ModelBenchData = {
+  body?: never
+  path?: never
+  query?: {
+    location?: {
+      directory?: string
+      workspace?: string
+    }
+  }
+  url: "/api/model/bench"
+}
+
+export type V2ModelBenchErrors = {
+  /**
+   * InvalidRequestError
+   */
+  400: InvalidRequestError
+  /**
+   * UnauthorizedError
+   */
+  401: UnauthorizedError
+  /**
+   * ServiceUnavailableError
+   */
+  503: ServiceUnavailableError
+}
+
+export type V2ModelBenchError = V2ModelBenchErrors[keyof V2ModelBenchErrors]
+
+export type V2ModelBenchResponses = {
+  /**
+   * Success
+   */
+  200: {
+    location: LocationInfo
+    data: Array<{
+      id: string
+      name: string
+      scores: {
+        [key: string]: number | "NaN" | "Infinity" | "-Infinity" | "Infinity" | "-Infinity" | "NaN"
+      }
+    }>
+  }
+}
+
+export type V2ModelBenchResponse = V2ModelBenchResponses[keyof V2ModelBenchResponses]
+
 export type V2ProviderListData = {
   body?: never
   path?: never

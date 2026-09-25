@@ -297,6 +297,8 @@ import type {
   V2IntegrationListResponses,
   V2LocationGetErrors,
   V2LocationGetResponses,
+  V2ModelBenchErrors,
+  V2ModelBenchResponses,
   V2ModelListErrors,
   V2ModelListResponses,
   V2PermissionRequestListErrors,
@@ -5891,6 +5893,28 @@ export class Model extends HeyApiClient {
     const params = buildClientParams([parameters], [{ args: [{ in: "query", key: "location" }] }])
     return (options?.client ?? this.client).get<V2ModelListResponses, V2ModelListErrors, ThrowOnError>({
       url: "/api/model",
+      ...options,
+      ...params,
+    })
+  }
+
+  /**
+   * List model benchmarks
+   *
+   * Retrieve benchmark leaderboard scores for models, indexed by model ID.
+   */
+  public bench<ThrowOnError extends boolean = false>(
+    parameters?: {
+      location?: {
+        directory?: string
+        workspace?: string
+      }
+    },
+    options?: Options<never, ThrowOnError>,
+  ) {
+    const params = buildClientParams([parameters], [{ args: [{ in: "query", key: "location" }] }])
+    return (options?.client ?? this.client).get<V2ModelBenchResponses, V2ModelBenchErrors, ThrowOnError>({
+      url: "/api/model/bench",
       ...options,
       ...params,
     })

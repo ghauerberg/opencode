@@ -1986,6 +1986,25 @@ export type ModelsListOutput = {
   }>
 }
 
+export type ModelsBenchInput = {
+  readonly location?: {
+    readonly location?: { readonly directory?: string | undefined; readonly workspace?: string | undefined } | undefined
+  }["location"]
+}
+
+export type ModelsBenchOutput = {
+  readonly location: {
+    readonly directory: string
+    readonly workspaceID?: string
+    readonly project: { readonly id: string; readonly directory: string }
+  }
+  readonly data: ReadonlyArray<{
+    readonly id: string
+    readonly name: string
+    readonly scores: { readonly [x: string]: number | "Infinity" | "-Infinity" | "NaN" }
+  }>
+}
+
 export type ProvidersListInput = {
   readonly location?: {
     readonly location?: { readonly directory?: string | undefined; readonly workspace?: string | undefined } | undefined

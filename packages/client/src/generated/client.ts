@@ -41,6 +41,8 @@ import type {
   MessagesListOutput,
   ModelsListInput,
   ModelsListOutput,
+  ModelsBenchInput,
+  ModelsBenchOutput,
   ProvidersListInput,
   ProvidersListOutput,
   ProvidersGetInput,
@@ -513,6 +515,18 @@ export function make(options: ClientOptions) {
           {
             method: "GET",
             path: `/api/model`,
+            query: { location: input?.["location"] },
+            successStatus: 200,
+            declaredStatuses: [503, 401, 400],
+            empty: false,
+          },
+          requestOptions,
+        ),
+      bench: (input?: ModelsBenchInput, requestOptions?: RequestOptions) =>
+        request<ModelsBenchOutput>(
+          {
+            method: "GET",
+            path: `/api/model/bench`,
             query: { location: input?.["location"] },
             successStatus: 200,
             declaredStatuses: [503, 401, 400],

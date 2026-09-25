@@ -8,9 +8,16 @@ import { Flag } from "@opencode-ai/core/flag/flag"
 import { useBindings, useOpencodeModeStack } from "../keymap"
 import { useClipboard } from "../context/clipboard"
 
+export const DIALOG_SIZE_WIDTH = {
+  medium: 60,
+  large: 88,
+  xlarge: 116,
+} as const
+
 export function Dialog(
   props: ParentProps<{
     size?: "medium" | "large" | "xlarge"
+    width?: number
     onClose: () => void
   }>,
 ) {
@@ -19,11 +26,7 @@ export function Dialog(
   const renderer = useRenderer()
 
   let dismiss = false
-  const width = () => {
-    if (props.size === "xlarge") return 116
-    if (props.size === "large") return 88
-    return 60
-  }
+  const width = () => props.width ?? DIALOG_SIZE_WIDTH[props.size ?? "medium"]
 
   return (
     <box
@@ -73,6 +76,7 @@ function init() {
       onClose?: () => void
     }[],
     size: "medium" as "medium" | "large" | "xlarge",
+    width: undefined as number | undefined,
   })
 
   const renderer = useRenderer()
@@ -143,6 +147,7 @@ function init() {
       }
       batch(() => {
         setStore("size", "medium")
+        setStore("width", undefined)
         setStore("stack", [])
       })
       refocus()
@@ -156,6 +161,7 @@ function init() {
         if (item.onClose) item.onClose()
       }
       setStore("size", "medium")
+      setStore("width", undefined)
       setStore("stack", [
         {
           element: input,
@@ -169,8 +175,17 @@ function init() {
     get size() {
       return store.size
     },
+    get width() {
+      return store.width
+    },
     setSize(size: "medium" | "large" | "xlarge") {
-      setStore("size", size)
+      batch(() => {
+        setStore("size", size)
+        setStore("width", undefined)
+      })
+    },
+    setWidth(width: number | undefined) {
+      setStore("width", width)
     },
   }
 }
@@ -213,7 +228,7 @@ export function DialogProvider(props: ParentProps) {
         onMouseUp={!Flag.OPENCODE_EXPERIMENTAL_DISABLE_COPY_ON_SELECT ? copySelection : undefined}
       >
         <Show when={value.stack.length}>
-          <Dialog onClose={() => value.clear()} size={value.size}>
+          <Dialog onClose={() => value.clear()} size={value.size} width={value.width}>
             {value.stack.at(-1)!.element}
           </Dialog>
         </Show>

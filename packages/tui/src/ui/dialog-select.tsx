@@ -23,6 +23,7 @@ import { formatKeyBindings, useBindings, useKeymapSelector } from "../keymap"
 export interface DialogSelectProps<T> {
   title: string
   titleView?: JSX.Element
+  header?: JSX.Element
   placeholder?: string
   footer?: JSX.Element
   emptyView?: JSX.Element
@@ -567,6 +568,9 @@ export function DialogSelect<T>(props: DialogSelectProps<T>) {
             esc
           </text>
         </box>
+        <Show when={props.header}>
+          <box paddingTop={1}>{props.header}</box>
+        </Show>
         <Show when={props.renderFilter !== false}>
           <box paddingTop={1}>
             <input

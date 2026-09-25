@@ -180,6 +180,18 @@ export type TuiDialogSelectProps<Value = unknown> = {
   current?: Value
 }
 
+export type TuiModelSelection = {
+  providerID: string
+  modelID: string
+  id: string
+}
+
+export type TuiDialogModelProps = {
+  title?: string
+  providerID?: string
+  onSelect: (selection: TuiModelSelection) => void
+}
+
 export type TuiPromptInfo = {
   input: string
   mode?: "normal" | "shell"
@@ -602,6 +614,7 @@ export type TuiPluginApi = {
     DialogConfirm: (props: TuiDialogConfirmProps) => JSX.Element
     DialogPrompt: (props: TuiDialogPromptProps) => JSX.Element
     DialogSelect: <Value = unknown>(props: TuiDialogSelectProps<Value>) => JSX.Element
+    DialogModel: (props: TuiDialogModelProps) => JSX.Element
     Slot: <Name extends string>(props: TuiSlotProps<Name>) => JSX.Element | null
     Prompt: (props: TuiPromptProps) => JSX.Element
     toast: (input: TuiToast) => void

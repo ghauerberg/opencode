@@ -13,6 +13,7 @@ import { Storage } from "@/storage/storage"
 import { Snapshot } from "@/snapshot"
 import { Plugin } from "@/plugin"
 import { ModelsDev } from "@opencode-ai/core/models-dev"
+import { Bench } from "@opencode-ai/core/bench"
 import { Provider } from "@/provider/provider"
 import { ProviderAuth } from "@/provider/auth"
 import { Agent } from "@/agent/agent"
@@ -68,6 +69,7 @@ export const AppLayer = AppNodeBuilderV1.build(
     Snapshot.node,
     Plugin.node,
     ModelsDev.node,
+    Bench.node,
     Provider.node,
     ProviderAuth.node,
     Agent.node,
