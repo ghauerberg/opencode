@@ -1526,6 +1526,56 @@ const scenarios: Scenario[] = [
       "status",
     ),
   http.protected
+    .post("/session/{sessionID}/command", "session.command")
+    .preserveDatabase()
+    .withLlm()
+    .seeded((ctx) =>
+      Effect.gen(function* () {
+        const session = yield* ctx.session({ title: "Advice command session" })
+        yield* ctx.message(session.id, { text: "Implement the feature carefully." })
+        yield* ctx.llmText("The current direction is sound. Keep the early compatibility constraint.")
+        yield* ctx.llmText("The current direction is sound. Keep the early compatibility constraint.")
+        return session
+      }),
+    )
+    .at((ctx) => ({
+      path: route("/session/{sessionID}/command", { sessionID: ctx.state.id }),
+      headers: ctx.headers(),
+      body: { command: "advice", arguments: "Should I proceed?", model: "test/test-model", agent: "build" },
+    }))
+    .jsonEffect(
+      200,
+      (body, ctx) =>
+        Effect.gen(function* () {
+          object(body)
+          const messages = yield* ctx.messages(ctx.state.id)
+          check(
+            messages.some(
+              (m) =>
+                m.info.role === "user" && m.parts.some((p) => p.type === "text" && p.text.includes("/advice")),
+            ),
+            "session should contain the /advice command message",
+          )
+          check(
+            messages.some(
+              (m) =>
+                m.info.role === "assistant" &&
+                m.parts.some((p) => p.type === "tool" && p.tool === "task" && p.state.status === "completed"),
+            ),
+            "session should contain a completed advisor task part",
+          )
+          check(
+            messages.some(
+              (m) =>
+                m.info.role === "user" &&
+                m.parts.some((p) => p.type === "text" && p.text.includes("early compatibility constraint")),
+            ),
+            "session should contain the injected advisor advice",
+          )
+        }),
+      "status",
+    ),
+  http.protected
     .post("/session/{sessionID}/shell", "session.shell")
     .preserveDatabase()
     .mutating()

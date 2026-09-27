@@ -228,13 +228,14 @@ describe("Session", () => {
         session.remove(info.id).pipe(Effect.ignore),
       )
       const saved = yield* session.get(created.id)
-      const fork = yield* Effect.acquireRelease(session.fork({ sessionID: created.id }), (info) =>
+      const fork = yield* Effect.acquireRelease(session.fork({ sessionID: created.id, parentID: created.id }), (info) =>
         session.remove(info.id).pipe(Effect.ignore),
       )
 
       expect(saved.metadata).toEqual(meta)
       expect(fork.metadata).toEqual(meta)
       expect(fork.metadata).not.toBe(meta)
+      expect(fork.parentID).toBe(created.id)
     }),
   )
 
