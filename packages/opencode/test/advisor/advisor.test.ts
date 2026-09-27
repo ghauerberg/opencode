@@ -4,7 +4,7 @@ import { Database } from "@opencode-ai/core/database/database"
 import { LayerNode } from "@opencode-ai/core/effect/layer-node"
 import { Global } from "@opencode-ai/core/global"
 import { SessionProjector } from "@opencode-ai/core/session/projector"
-import { Effect, Layer, Queue, Fiber } from "effect"
+import { Effect, Layer, Queue, Fiber, Exit } from "effect"
 import { Agent } from "../../src/agent/agent"
 import { BackgroundJob } from "@/background/job"
 import { EventV2Bridge } from "@/event-v2-bridge"
@@ -211,11 +211,81 @@ describe("advisor", () => {
         expect(result.output).toContain("current approach needs adjustment")
         expect(result.output).toContain("Inspect the API boundary")
 
-        // The temporary fork is removed after its final response is captured.
+        // The temporary subagent is archived separately from the parent conversation
+        // and keeps its own clean conversation (no copied parent messages).
         const children = yield* sessions.children(chat.id)
-        expect(children).toHaveLength(0)
+        expect(children).toHaveLength(1)
+        expect(yield* sessions.messages({ sessionID: children[0].id })).toHaveLength(0)
+        expect(children[0]?.time.archived).toBeNumber()
+        // The tool part links to the temporary advisor session, not the parent.
+        expect(result.metadata.sessionId).toBe(children[0].id)
       }),
     advisorConfig,
+  )
+
+  it.instance("archives the temporary child when the advisor model call fails", () =>
+    Effect.gen(function* () {
+      const advisor = yield* Advisor.Service
+      const sessions = yield* Session.Service
+      const { chat } = yield* seed()
+
+      const exit = yield* advisor
+        .runAdvisorReview({
+          sessionID: chat.id,
+          trigger: "user",
+        promptOps: {
+          cancel: () => Effect.void,
+          resolvePromptParts: (template) => Effect.succeed([{ type: "text" as const, text: template }]),
+          prompt: (input) =>
+            Effect.sync(() => {
+              const base = reply(input, "")
+              return {
+                ...base,
+                info: {
+                  ...base.info,
+                  error: new SessionV1.APIError({ message: "model call failed", isRetryable: false }).toObject(),
+                },
+              }
+            }),
+        },
+        })
+        .pipe(Effect.exit)
+      expect(Exit.isFailure(exit)).toBe(true)
+      const children = yield* sessions.children(chat.id)
+      expect(children).toHaveLength(1)
+      expect(children[0]?.time.archived).toBeNumber()
+    }),
+    advisorConfig,
+  )
+
+  it.instance("failed automatic review resets the step counter", () =>
+    Effect.gen(function* () {
+      const advisor = yield* Advisor.Service
+      const { chat } = yield* seed()
+      for (let index = 0; index < 3; index++)
+        yield* advisor.step({ sessionID: chat.id, tool: "read", agent: "build" })
+
+      const triggered = yield* advisor.maybeAutoReview({
+        sessionID: chat.id,
+        agent: "build",
+        model: ref,
+        promptOps: stubOps(advisorText),
+      })
+      // The review fails (no such agent) and the session keeps working...
+      expect(triggered).toBe(false)
+      // ...and the counter restarts instead of retrying on every next step.
+      expect(yield* advisor.getState(chat.id)).toMatchObject({ steps: 0, advisorRunning: false })
+      yield* advisor.step({ sessionID: chat.id, tool: "read", agent: "build" })
+      expect(yield* advisor.getState(chat.id)).toMatchObject({ steps: 1, advisorRunning: false })
+    }),
+    {
+      config: {
+        advisor: {
+          agent: "missing-advisor",
+          automatic: { every: 3 },
+        },
+      },
+    },
   )
 
   it.instance("counter is per-session and steps count only configured tools", () =>
@@ -262,13 +332,13 @@ describe("advisor", () => {
         expect(after.steps).toBe(0)
         expect(after.history).toHaveLength(1)
 
-        // The advice landed as a synthetic message in the same session.
+        // The advice landed as a visible user message in the same session.
         const msgs = yield* sessions.messages({ sessionID: chat.id }).pipe(Effect.orDie)
-        const adviceMsg = msgs.find((msg) =>
+        const advicePart = msgs.find((msg) =>
           msg.parts.some((part) => part.type === "text" && part.text.includes("current approach needs adjustment")),
-        )
-        expect(adviceMsg).toBeDefined()
-        expect(adviceMsg?.info.role).toBe("user")
+        )?.parts.find((part) => part.type === "text")
+        expect(advicePart).toBeDefined()
+        expect(advicePart?.type === "text" ? advicePart.synthetic : undefined).toBeUndefined()
       }),
     advisorConfig,
   )
@@ -341,7 +411,7 @@ describe("advisor", () => {
     }),
   )
 
-  it.instance("full-history fork retains an early constraint across a large conversation", () =>
+  it.instance("clean subagent prompt carries the session's visible history", () =>
     Effect.gen(function* () {
       const advisor = yield* Advisor.Service
       const sessions = yield* Session.Service
@@ -405,7 +475,8 @@ describe("advisor", () => {
       const agentService = yield* Agent.Service
       const advisorAgent = yield* agentService.get("advisor")
       let sawConstraint = false
-      let sawFullHistoryMarker = false
+      let sawLaterHistory = false
+      let sawReason = false
       let sawReadOnlyPermissions = false
       const review = yield* advisor.runAdvisorReview({
         sessionID: chat.id,
@@ -417,33 +488,31 @@ describe("advisor", () => {
           prompt: (input) =>
             Effect.gen(function* () {
               const child = yield* sessions.get(input.sessionID)
-              const copied = yield* sessions.messages({ sessionID: input.sessionID })
-              sawConstraint = copied.some((message) =>
-                message.parts.some(
-                  (part) => part.type === "text" && part.text.includes("component X must remain backwards compatible"),
-                ),
-              )
-              sawFullHistoryMarker = child.metadata?.[Advisor.FULL_HISTORY_METADATA_KEY] === true
+              const promptText = input.parts.map((part) => (part.type === "text" ? part.text : "")).join("\n")
+              sawConstraint = promptText.includes("component X must remain backwards compatible")
+              sawLaterHistory = promptText.includes("Unrelated investigation 39")
+              sawReason = promptText.includes("Should component X be changed?")
               const action = (permission: string) =>
                 Permission.evaluate(permission, "*", advisorAgent?.permission ?? [], child.permission ?? []).action
               sawReadOnlyPermissions =
                 action("read") === "allow" && ["edit", "write", "bash", "task"].every((tool) => action(tool) === "deny")
-              expect(copied.length).toBeGreaterThan(80)
-              expect(
-                input.parts.some(
-                  (part) => part.type === "text" && part.text.includes("Should component X be changed?"),
-                ),
-              ).toBe(true)
+              // The subagent keeps its own clean conversation: no parent messages copied.
+              expect(yield* sessions.messages({ sessionID: input.sessionID })).toHaveLength(0)
               return reply(input, advisorText)
             }).pipe(Effect.orDie),
         },
       })
       expect(review.response).toContain("current approach needs adjustment")
       expect(sawConstraint).toBe(true)
-      expect(sawFullHistoryMarker).toBe(true)
+      expect(sawLaterHistory).toBe(true)
+      expect(sawReason).toBe(true)
       expect(sawReadOnlyPermissions).toBe(true)
       expect(yield* sessions.messages({ sessionID: chat.id })).toHaveLength(before.length)
-      expect(yield* sessions.children(chat.id)).toHaveLength(0)
+      const children = yield* sessions.children(chat.id)
+      expect(children).toHaveLength(1)
+      expect(children[0]?.agent).toBe("advisor")
+      expect(children[0]?.metadata?.advisorTemporary).toBe(true)
+      expect(children[0]?.time.archived).toBeNumber()
     }),
   )
 
@@ -505,18 +574,15 @@ describe("advisor", () => {
   )
 
   it.instance(
-    "/advise and the legacy /advisor command are direct advisor entry points",
+    "/advice is the single user-facing Advisor entry point",
     () =>
       Effect.gen(function* () {
         const commands = yield* Command.Service
-        const advisorCmd = yield* commands.get(Command.Default.ADVISOR)
-        const adviseCmd = yield* commands.get(Command.Default.ADVISE)
-        expect(advisorCmd).toBeDefined()
-        expect(advisorCmd?.name).toBe("advisor")
-        expect(advisorCmd?.description).toContain("advisor")
-        expect(advisorCmd?.subtask).toBeUndefined()
-        expect(adviseCmd?.name).toBe("advise")
-        expect(adviseCmd?.subtask).toBeUndefined()
+        const adviceCmd = yield* commands.get(Command.Default.ADVICE)
+        expect(adviceCmd?.name).toBe("advice")
+        expect(adviceCmd?.subtask).toBeUndefined()
+        expect(yield* commands.get("advisor")).toBeUndefined()
+        expect(yield* commands.get("advise")).toBeUndefined()
       }),
     advisorConfig,
   )

@@ -1713,6 +1713,12 @@ function ToolPart(props: { last: boolean; part: ToolPart; message: AssistantMess
   // Hide tool if showDetails is false and tool completed successfully
   const shouldHide = createMemo(() => {
     if (ctx.showDetails()) return false
+    if (
+      props.part.tool === "task" &&
+      props.part.state.status === "completed" &&
+      props.part.state.metadata.advisor === true
+    )
+      return false
     if (props.part.state.status !== "completed") return false
     return true
   })

@@ -46,8 +46,7 @@ export function hints(template: string) {
 export const Default = {
   INIT: "init",
   REVIEW: "review",
-  ADVISOR: "advisor",
-  ADVISE: "advise",
+  ADVICE: "advice",
   ADVISOR_MODEL: "advisormodel",
 } as const
 
@@ -89,17 +88,8 @@ const layer = Layer.effect(
         subtask: true,
         hints: hints(PROMPT_REVIEW),
       }
-      commands[Default.ADVISOR] = {
-        name: Default.ADVISOR,
-        description: "ask the senior advisor to review the current task and next steps",
-        source: "command",
-        get template() {
-          return "Review the current task and provide strategic, read-only advice."
-        },
-        hints: [],
-      }
-      commands[Default.ADVISE] = {
-        name: Default.ADVISE,
+      commands[Default.ADVICE] = {
+        name: Default.ADVICE,
         description: "ask the senior advisor to review the current task and next steps",
         source: "command",
         get template() {

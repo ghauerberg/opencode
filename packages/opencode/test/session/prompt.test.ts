@@ -2543,17 +2543,13 @@ noLLMServer.instance(
 )
 
 it.instance(
-  "/advise gives the fork pre-compaction history and returns only the final advice",
+  "/advise hands the clean advisor subagent the visible history since the last compaction",
   () =>
     Effect.gen(function* () {
       const { llm } = yield* useServerConfig((url) => providerCfg(url))
       const prompt = yield* SessionPrompt.Service
       const sessions = yield* Session.Service
-      const parent = yield* sessions.create({
-        title: "Full-history advisor",
-        agent: "build",
-        model: { id: ref.modelID, providerID: ref.providerID },
-      })
+      const parent = yield* sessions.create({ title: "Full-history advisor", agent: "build" })
       const early = yield* user(parent.id, "Important early constraint: component X must remain backwards compatible.")
       const earlyAssistant = yield* sessions.updateMessage({
         id: MessageID.ascending(),
@@ -2681,42 +2677,91 @@ it.instance(
       ).toBe(false)
       const parentMessageCount = persisted.length
 
-      yield* llm.text(
+      const gate = yield* Deferred.make<void>()
+      yield* llm.hold(
         "Preserve the early backwards-compatibility constraint on component X. Check compatibility before changing it.",
+        deferredAsPromise(gate),
       )
-      const result = yield* prompt.command({
-        sessionID: parent.id,
-        command: "advise",
-        arguments: "Should component X be changed?",
-      })
+      const fiber = yield* prompt
+        .command({
+          sessionID: parent.id,
+          command: "advice",
+          model: "test/test-model",
+          arguments: "Should component X be changed?",
+        })
+        .pipe(Effect.forkScoped)
+      yield* awaitWithTimeout(llm.wait(1), "Advisor did not start a model request", "10 seconds")
+      const running = yield* pollWithTimeout(
+        Effect.gen(function* () {
+          const messages = yield* sessions.messages({ sessionID: parent.id })
+          const part = messages
+            .flatMap((message) => message.parts)
+            .find((item) => item.type === "tool" && item.tool === "task")
+          if (part?.type !== "tool" || part.state.status !== "running") return undefined
+          const childID = part.state.metadata?.sessionId
+          if (typeof childID !== "string") return undefined
+          return { childID }
+        }),
+        "Advisor task was not published as a running subagent",
+      )
+      const child = yield* sessions.get(SessionID.make(running.childID))
+      const status = yield* SessionStatus.Service
+      expect(child.parentID).toBe(parent.id)
+      expect(child.title).toContain("@advisor subagent")
+      expect(child.agent).toBe("advisor")
+      expect((yield* status.get(child.id)).type).toBe("busy")
+      // No fork: the child's conversation holds only its own prompt and response,
+      // not a copy of the parent's messages.
+      expect((yield* sessions.messages({ sessionID: child.id })).length).toBeLessThan(parentMessageCount)
+      yield* Deferred.succeed(gate, undefined)
+      const result = yield* Fiber.join(fiber)
       const inputs = yield* llm.inputs
-      const advisorInput = inputs.find((input) =>
-        JSON.stringify(input.messages).includes("component X must remain backwards compatible"),
-      )
+      const advisorInput = inputs.find((input) => JSON.stringify(input.messages).includes("Compacted summary"))
       expect(advisorInput).toBeDefined()
       const sentMessages = JSON.stringify(advisorInput?.messages)
       expect(sentMessages).toContain("Should component X be changed?")
+      // The visible tail since the last compaction is present...
       expect(sentMessages).toContain("unrelated detail")
       expect(sentMessages).toContain("Unrelated investigation turn 23")
       expect(sentMessages).toContain("Compacted summary")
-      expect(sentMessages).toContain("What did we do so far?")
+      expect(sentMessages).toContain("We are now considering changing component X.")
+      // ...while everything before the compaction's tail start is not serialized
+      // into the advisor prompt, no matter how large it is.
+      expect(sentMessages).not.toContain("component X must remain backwards compatible")
+      expect(sentMessages).not.toContain("Understood.")
+      // The transcript is a raw serialization of the visible history; it is not
+      // rebuilt through the model-message compaction transform.
+      expect(sentMessages).not.toContain("What did we do so far?")
       const resultText = result.parts.find((part) => part.type === "text")
       expect(resultText?.type === "text" ? resultText.text : "").toContain("backwards-compatibility constraint")
-      expect(yield* sessions.children(parent.id)).toHaveLength(0)
-      expect(yield* sessions.messages({ sessionID: parent.id })).toHaveLength(parentMessageCount + 1)
+      const children = yield* sessions.children(parent.id)
+      expect(children).toHaveLength(1)
+      expect(children[0]?.metadata?.advisorTemporary).toBe(true)
+      expect(children[0]?.time.archived).toBeNumber()
+      const finalMessages = yield* sessions.messages({ sessionID: parent.id })
+      expect(finalMessages).toHaveLength(parentMessageCount + 3)
+      const advisorTask = finalMessages
+        .flatMap((message) => message.parts)
+        .find((part) => part.type === "tool" && part.tool === "task")
+      expect(advisorTask?.type === "tool" ? advisorTask.state.status : undefined).toBe("completed")
+      if (advisorTask?.type === "tool" && advisorTask.state.status === "completed") {
+        expect(advisorTask.state.metadata.advisor).toBe(true)
+        expect(advisorTask.state.metadata.sessionId).toBeString()
+        expect(advisorTask.state.output).toContain("Final advice follows")
+      }
     }),
   30_000,
 )
 
 it.instance(
-  "/advise reports full-history context overflow without compacting",
+  "/advise reports context overflow without compacting",
   () =>
     Effect.gen(function* () {
       const { llm } = yield* useServerConfig((url) => providerCfg(url))
       const prompt = yield* SessionPrompt.Service
       const sessions = yield* Session.Service
       const parent = yield* sessions.create({
-        title: "Full-history overflow",
+        title: "Advisor overflow",
         agent: "build",
         model: { id: ref.modelID, providerID: ref.providerID },
       })
@@ -2725,13 +2770,15 @@ it.instance(
 
       const result = yield* prompt.command({
         sessionID: parent.id,
-        command: "advise",
+        command: "advice",
         arguments: "Review everything so far.",
       })
       const advice = result.parts.find((part) => part.type === "text")
-      expect(advice?.type === "text" ? advice.text : "").toContain("Full-history Advisor review unavailable")
-      expect(advice?.type === "text" ? advice.text : "").toContain("No conversation history was truncated")
-      expect(yield* sessions.children(parent.id)).toHaveLength(0)
+      expect(advice?.type === "text" ? advice.text : "").toContain("Advisor review unavailable")
+      expect(advice?.type === "text" ? advice.text : "").toContain("No history was truncated")
+      const children = yield* sessions.children(parent.id)
+      expect(children).toHaveLength(1)
+      expect(children[0]?.time.archived).toBeNumber()
       expect(
         (yield* sessions.messages({ sessionID: parent.id })).some((message) =>
           message.parts.some((part) => part.type === "compaction"),

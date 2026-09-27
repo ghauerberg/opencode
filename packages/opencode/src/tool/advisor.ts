@@ -2,6 +2,7 @@ import { Effect, Schema } from "effect"
 import * as Tool from "./tool"
 import DESCRIPTION from "./advisor.txt"
 import { Advisor } from "@/advisor"
+import { SessionID } from "@/session/schema"
 import type { TaskPromptOps } from "./task"
 
 const id = "advisor_review"
@@ -37,18 +38,23 @@ export const AdvisorTool = Tool.define(
       const ops = ctx.extra?.promptOps as TaskPromptOps
       if (!ops) return yield* Effect.fail(new Error("AdvisorTool requires promptOps in ctx.extra"))
 
+      // Capture the temporary advisor session so this tool part can link to the
+      // advisor's own transcript (falling back to the parent if unavailable).
+      let childSessionID: SessionID | undefined
       const review = yield* advisor.runAdvisorReview({
         sessionID: ctx.sessionID,
         trigger: "model",
         reason: params.reason,
         promptOps: ops,
+        onChild: (child) => Effect.sync(() => { childSessionID = child.sessionID }),
       })
+      const target = childSessionID ?? review.sessionID
 
       yield* ctx.metadata({
         title: "Advisor review",
         metadata: {
           trigger: "model",
-          sessionId: review.sessionID,
+          sessionId: target,
           cycle: review.cycle,
         },
       })
@@ -57,7 +63,7 @@ export const AdvisorTool = Tool.define(
         title: "Advisor review",
         metadata: {
           trigger: "model",
-          sessionId: review.sessionID,
+          sessionId: target,
           cycle: review.cycle,
         },
         output: Advisor.renderAdvice({ trigger: "model", cycle: review.cycle, review }),

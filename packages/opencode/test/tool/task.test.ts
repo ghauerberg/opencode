@@ -1,5 +1,10 @@
-import { afterEach, describe, expect } from "bun:test"
+import * as fs from "node:fs/promises"
+import * as os from "node:os"
+import * as path from "node:path"
+import { afterAll, afterEach, describe, expect } from "bun:test"
 import { SessionV1 } from "@opencode-ai/core/v1/session"
+import { Global } from "@opencode-ai/core/global"
+import { ModelPickStore } from "@/modelpick/store"
 import { Database } from "@opencode-ai/core/database/database"
 import { LayerNode } from "@opencode-ai/core/effect/layer-node"
 import { SessionProjector } from "@opencode-ai/core/session/projector"
@@ -25,8 +30,17 @@ import { testEffect } from "../lib/effect"
 import { ProviderV2 } from "@opencode-ai/core/provider"
 import { ModelV2 } from "@opencode-ai/core/model"
 
+const modelConfigDir = path.join(os.tmpdir(), `opencode-task-models-${process.pid}-${Date.now()}.d`)
+
 afterEach(async () => {
   await disposeAllInstances()
+  // The tests share one redirected Global config dir; clear any persisted model
+  // choice so each test starts from a clean state.
+  await fs.rm(path.join(modelConfigDir, "consult-models.json"), { force: true })
+})
+
+afterAll(async () => {
+  await fs.rm(modelConfigDir, { recursive: true, force: true }).catch(() => {})
 })
 
 const ref = {
@@ -51,8 +65,12 @@ const layer = (flags: Partial<RuntimeFlags.Info> = {}) =>
       Database.node,
       RuntimeFlags.node,
       Ripgrep.node,
+      Global.node,
     ]),
-    [[RuntimeFlags.node, RuntimeFlags.layer(flags)]],
+    [
+      [RuntimeFlags.node, RuntimeFlags.layer(flags)],
+      [Global.node, Global.layerWith({ config: modelConfigDir })],
+    ],
   )
 
 const it = testEffect(layer())
@@ -314,9 +332,61 @@ describe("tool.task", () => {
         },
       )
 
-      expect(result.metadata.model).toEqual(model)
-      expect(seen?.model).toEqual(model)
-    }),
+    expect(result.metadata.model).toEqual(model)
+    expect(seen?.model).toEqual(model)
+  }),
+  )
+
+  it.instance(
+    "execute uses the model saved for the subagent type",
+    () =>
+      Effect.gen(function* () {
+        const global = yield* Global.Service
+        const stored = { providerID: "saved-provider", modelID: "saved-model" }
+        yield* ModelPickStore.save(global.config, "zebra", stored)
+
+        const { chat, assistant } = yield* seed()
+        const tool = yield* TaskTool
+        const def = yield* tool.init()
+        let seen: SessionPrompt.PromptInput | undefined
+
+        const result = yield* def.execute(
+          {
+            description: "review plan",
+            prompt: "review plan.md",
+            subagent_type: "zebra",
+          },
+          {
+            sessionID: chat.id,
+            messageID: assistant.id,
+            agent: "build",
+            abort: new AbortController().signal,
+            extra: { promptOps: stubOps({ onPrompt: (input) => (seen = input) }) },
+            messages: [],
+            metadata: () => Effect.void,
+            ask: () => Effect.void,
+          },
+        )
+
+        const resolved = {
+          providerID: ProviderV2.ID.make(stored.providerID),
+          modelID: ModelV2.ID.make(stored.modelID),
+        }
+        expect(result.metadata.model).toEqual(resolved)
+        expect(seen?.model).toEqual(resolved)
+        // The parent's variant does not carry over to the saved model.
+        expect(seen?.variant).toBeUndefined()
+      }),
+    {
+      config: {
+        agent: {
+          zebra: {
+            description: "Zebra agent",
+            mode: "subagent",
+          },
+        },
+      },
+    },
   )
 
   it.instance("execute surfaces child errors with a resumable task_id", () =>

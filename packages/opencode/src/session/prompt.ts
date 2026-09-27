@@ -57,6 +57,7 @@ import { SessionReminders } from "./reminders"
 import { SessionTools } from "./tools"
 import { LLMEvent } from "@opencode-ai/llm"
 import { Advisor } from "@/advisor"
+import { Advisor as AdvisorSchema } from "@/advisor/schema"
 
 // @ts-ignore
 globalThis.AI_SDK_LOG_WARNINGS = false
@@ -305,10 +306,10 @@ const layer = Layer.effect(
         description: task.description,
         subagent_type: task.agent,
         command: task.command,
-        // The /advisor command lets the user pin a model for advice; forward it
+        // The /advice command lets the user pin a model for advice; forward it
         // so the advisor subagent uses the persisted override. Other subtasks
         // keep the task tool's normal agent-model resolution.
-        ...(task.command === Command.Default.ADVISOR && task.model
+        ...(task.command === Command.Default.ADVICE && task.model
           ? { model: { providerID: task.model.providerID, modelID: task.model.modelID } }
           : {}),
       }
@@ -1097,10 +1098,9 @@ const layer = Layer.effect(
           yield* status.set(sessionID, { type: "busy" })
           yield* Effect.logInfo("loop", { "session.id": sessionID, step })
 
-          const fullHistory = session.metadata?.[Advisor.FULL_HISTORY_METADATA_KEY] === true
-          let msgs = yield* (
-            fullHistory ? MessageV2.stream(sessionID) : MessageV2.filterCompactedEffect(sessionID)
-          ).pipe(Effect.provideService(Database.Service, database))
+          let msgs = yield* MessageV2.filterCompactedEffect(sessionID).pipe(
+            Effect.provideService(Database.Service, database),
+          )
 
           const { user: lastUser, assistant: lastAssistant, finished: lastFinished, tasks } = MessageV2.latest(msgs)
 
@@ -1108,7 +1108,7 @@ const layer = Layer.effect(
 
           // Advisor auto-review checkpoint: when the counted step allowance is
           // reached, run the advisor synchronously (blocking the loop) and inject
-          // the advice as a synthetic message before the next model turn, so the
+          // the advice as a user message before the next model turn, so the
           // main session genuinely pauses until the review completes.
           const promptOps = yield* ops()
           if (
@@ -1159,7 +1159,7 @@ const layer = Layer.effect(
             }).pipe(Effect.ignore, Effect.forkIn(scope))
 
           const model = yield* getModel(lastUser.model.providerID, lastUser.model.modelID, sessionID)
-          const task = fullHistory ? undefined : tasks.pop()
+          const task = tasks.pop()
 
           if (task?.type === "subtask") {
             yield* handleSubtask({ task, model, lastUser, sessionID, session, msgs })
@@ -1179,7 +1179,6 @@ const layer = Layer.effect(
           }
 
           if (
-            !fullHistory &&
             lastFinished &&
             lastFinished.summary !== true &&
             (yield* compaction.isOverflow({ tokens: lastFinished.tokens, model }))
@@ -1340,9 +1339,9 @@ const layer = Layer.effect(
 
             if (result === "stop") return "break" as const
             if (result === "compact") {
-              if (fullHistory) {
+              if (session.metadata?.advisorTemporary === true) {
                 handle.message.error = new SessionV1.ContextOverflowError({
-                  message: "Advisor full-history review exceeded the model context window; no history was truncated.",
+                  message: "Advisor review of the visible session history exceeded the model context window; no history was truncated.",
                 }).toObject()
                 handle.message.finish = "error"
                 yield* sessions.updateMessage(handle.message)
@@ -1438,23 +1437,170 @@ const layer = Layer.effect(
       }
       template = template.trim()
 
-      if (input.command === Command.Default.ADVISOR || input.command === Command.Default.ADVISE) {
+      if (input.command === Command.Default.ADVICE) {
         const parent = yield* sessions.get(input.sessionID).pipe(Effect.orDie)
-        const review = yield* advisor
+        const parentAgent = parent.agent ?? (yield* agents.defaultInfo()).name
+        const selectedModel = input.model ? Provider.parseModel(input.model) : undefined
+        const parentModel = selectedModel
+          ? {
+              providerID: ProviderV2.ID.make(selectedModel.providerID),
+              modelID: ModelV2.ID.make(selectedModel.modelID),
+            }
+          : {
+              providerID: ProviderV2.ID.make(parent.model?.providerID ?? "unknown"),
+              modelID: ModelV2.ID.make(parent.model?.id ?? "unknown"),
+            }
+        const commandMessage: SessionV1.User = yield* sessions.updateMessage({
+          id: MessageID.ascending(),
+          sessionID: input.sessionID,
+          role: "user",
+          time: { created: Date.now() },
+          agent: parentAgent,
+          model: parentModel,
+        })
+        yield* sessions.updatePart({
+          id: PartID.ascending(),
+          messageID: commandMessage.id,
+          sessionID: input.sessionID,
+          type: "text",
+          text: `/${input.command}${input.arguments.trim() ? ` ${input.arguments.trim()}` : ""}`,
+        } satisfies SessionV1.TextPart)
+
+        const ctx = yield* InstanceState.context
+        const taskMessage: SessionV1.Assistant = {
+          id: MessageID.ascending(),
+          parentID: commandMessage.id,
+          sessionID: input.sessionID,
+          role: "assistant",
+          mode: parentAgent,
+          agent: parentAgent,
+          path: { cwd: ctx.directory, root: ctx.worktree },
+          cost: 0,
+          tokens: { input: 0, output: 0, reasoning: 0, cache: { read: 0, write: 0 } },
+          modelID: parentModel.modelID,
+          providerID: parentModel.providerID,
+          time: { created: Date.now() },
+        }
+        const taskInput = {
+          prompt: `Review the full conversation and provide strategic, read-only advice.${input.arguments.trim() ? ` Focus on: ${input.arguments.trim()}` : ""}`,
+          description: "Review the full conversation and recommend next steps",
+          subagent_type: "advisor",
+          command: input.command,
+        }
+        const taskPartID = PartID.ascending()
+        const taskCallID = ulid()
+        const now = Date.now()
+        let taskPart: SessionV1.ToolPart = yield* sessions.updateMessage(taskMessage).pipe(
+          Effect.andThen(() =>
+            sessions.updatePart({
+              id: taskPartID,
+              messageID: taskMessage.id,
+              sessionID: input.sessionID,
+              type: "tool",
+              callID: taskCallID,
+              tool: TaskTool.id,
+              state: {
+                status: "running",
+                input: taskInput,
+                title: "Advisor review",
+                metadata: {
+                  advisor: true,
+                  parentSessionId: input.sessionID,
+                },
+                time: { start: now },
+              },
+            } satisfies SessionV1.ToolPart),
+          ),
+        )
+        const exit = yield* advisor
           .runAdvisorReview({
             sessionID: input.sessionID,
             trigger: "user",
             reason: input.arguments.trim() || undefined,
+            model: parentModel,
             promptOps: yield* ops(),
+            onChild: (child) =>
+              Effect.gen(function* () {
+                const running = taskPart.state.status === "running" ? taskPart.state : undefined
+                if (!running) return
+                taskPart = yield* sessions.updatePart({
+                  ...taskPart,
+                  state: {
+                    status: "running",
+                    input: running.input,
+                    title: running.title,
+                    metadata: { ...running.metadata, sessionId: child.sessionID, model: child.model },
+                    time: running.time,
+                  },
+                } satisfies SessionV1.ToolPart)
+              }),
           })
-          .pipe(Effect.orDie)
+          .pipe(Effect.exit)
+        if (Exit.isFailure(exit)) {
+          const now = Date.now()
+          if (taskPart?.state.status === "running") {
+            yield* sessions.updatePart({
+              ...taskPart,
+              state: {
+                status: "error",
+                input: taskPart.state.input,
+                error: Cause.pretty(exit.cause),
+                metadata: taskPart.state.metadata,
+                time: { start: taskPart.state.time.start, end: now },
+              },
+            } satisfies SessionV1.ToolPart)
+            taskMessage.finish = "tool-calls"
+            taskMessage.time.completed = now
+            yield* sessions.updateMessage(taskMessage)
+          }
+          const failure = Cause.squash(exit.cause)
+          const message = failure instanceof Error ? failure.message : String(failure)
+          const failedReview: AdvisorSchema.Review = {
+            sessionID: input.sessionID,
+            trigger: "user",
+            cycle: 0,
+            response: `Advisor review failed: ${message}`,
+            createdAt: now,
+          }
+          const result = yield* Advisor.injectAdvice({
+            sessionID: input.sessionID,
+            agent: parentAgent,
+            model: parentModel,
+            review: failedReview,
+          }).pipe(Effect.provideService(Session.Service, sessions))
+          yield* events.publish(Command.Event.Executed, {
+            name: input.command,
+            sessionID: input.sessionID,
+            arguments: input.arguments,
+            messageID: result.id,
+          })
+          return yield* MessageV2.get({ sessionID: input.sessionID, messageID: result.id }).pipe(
+            Effect.provideService(Database.Service, database),
+            Effect.orDie,
+          )
+        }
+        const review = exit.value
+        if (taskPart?.state.status === "running") {
+          const now = Date.now()
+          yield* sessions.updatePart({
+            ...taskPart,
+            state: {
+              status: "completed",
+              input: taskPart.state.input,
+              title: "Advisor review",
+              metadata: taskPart.state.metadata ?? {},
+              output: "Advisor review completed. Final advice follows as the next user message.",
+              time: { start: taskPart.state.time.start, end: now },
+            },
+          } satisfies SessionV1.ToolPart)
+          taskMessage.finish = "tool-calls"
+          taskMessage.time.completed = now
+          yield* sessions.updateMessage(taskMessage)
+        }
         const result = yield* Advisor.injectAdvice({
           sessionID: input.sessionID,
-          agent: parent.agent ?? (yield* agents.defaultInfo()).name,
-          model: {
-            providerID: ProviderV2.ID.make(parent.model?.providerID ?? "unknown"),
-            modelID: ModelV2.ID.make(parent.model?.id ?? "unknown"),
-          },
+          agent: parentAgent,
+          model: parentModel,
           review,
         }).pipe(Effect.provideService(Session.Service, sessions))
         yield* events.publish(Command.Event.Executed, {
@@ -1524,7 +1670,7 @@ const layer = Layer.effect(
       }
 
       const taskModel = yield* Effect.gen(function* () {
-        if (input.command === Command.Default.ADVISOR) {
+        if (input.command === Command.Default.ADVICE) {
           const configured = yield* advisor.getConfiguredModel(input.sessionID)
           if (configured) return configured
         }

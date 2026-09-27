@@ -10,6 +10,8 @@ import { ProviderV2 } from "@opencode-ai/core/provider"
 import { ModelV2 } from "@opencode-ai/core/model"
 import { InstanceState } from "@/effect/instance-state"
 import { Global } from "@opencode-ai/core/global"
+import { Database } from "@opencode-ai/core/database/database"
+import { MessageV2 } from "@/session/message-v2"
 import { ModelPickStore } from "@/modelpick/store"
 import { ModelPick } from "@/modelpick"
 import type { TaskPromptOps } from "@/tool/task"
@@ -17,7 +19,6 @@ import { Advisor } from "./schema"
 
 const DEFAULT_ALLOWANCE = 50
 const DEFAULT_STEP_TOOLS = ["read", "write", "edit", "bash", "grep", "glob"]
-export const FULL_HISTORY_METADATA_KEY = "advisorFullHistory"
 
 export class AdvisorError extends Schema.TaggedErrorClass<AdvisorError>()("AdvisorError", {
   message: Schema.String,
@@ -28,7 +29,12 @@ export interface Interface {
     sessionID: SessionID
     trigger: Advisor.Trigger
     reason?: string
+    model?: { providerID: ProviderV2.ID; modelID: ModelV2.ID }
     promptOps: TaskPromptOps
+    onChild?: (input: {
+      sessionID: SessionID
+      model: { providerID: ProviderV2.ID; modelID: ModelV2.ID }
+    }) => Effect.Effect<void>
   }) => Effect.Effect<Advisor.Review, AdvisorError>
   readonly step: (input: { sessionID: SessionID; tool: string; agent: string }) => Effect.Effect<void>
   readonly reset: (sessionID: SessionID) => Effect.Effect<void>
@@ -66,15 +72,62 @@ function renderAdvice(input: { trigger: Advisor.Trigger; cycle: number; review: 
   ].join("\n")
 }
 
-function reviewPrompt(input: {
+/**
+ * Serialize the session's visible history (everything since the last
+ * compaction, with the compaction summary standing in for earlier work) into a
+ * single transcript, so the advisor subagent receives the same context the
+ * primary agent sees in one clean prompt without copying messages.
+ */
+function renderTranscript(history: SessionV1.WithParts[]): string {
+  const lines: string[] = []
+  for (const message of history) {
+    const info = message.info
+    if (info.role === "user") {
+      lines.push(`=== user (agent=${info.agent}) ===`)
+      for (const part of message.parts) {
+        if (part.type === "text") {
+          lines.push(part.synthetic ? `[synthetic user note] ${part.text}` : part.text)
+        } else if (part.type === "file") {
+          lines.push(`[attachment: ${part.filename ?? part.mime}]`)
+        } else if (part.type === "subtask") {
+          lines.push(`[subtask delegated to ${part.agent}] ${part.description}\n${part.prompt}`)
+        } else if (part.type === "compaction") {
+          lines.push("[compaction: earlier history was summarized]")
+        }
+      }
+    } else {
+      const head = [`agent=${info.agent}`]
+      if (info.finish) head.push(`finish=${info.finish}`)
+      if (info.summary) head.push("summary=true")
+      if (info.error) head.push(`error=${info.error.name}`)
+      lines.push(`=== assistant (${head.join(", ")}) ===`)
+      for (const part of message.parts) {
+        if (part.type === "text") {
+          lines.push(part.synthetic ? `[synthetic assistant note] ${part.text}` : part.text)
+        } else if (part.type === "tool") {
+          lines.push(`[tool ${part.tool}] status=${part.state.status}`)
+          lines.push(`input: ${JSON.stringify(part.state.input)}`)
+          if (part.state.status === "completed") lines.push(`output:\n${part.state.output}`)
+          if (part.state.status === "error") lines.push(`error: ${part.state.error}`)
+        } else if (part.type === "compaction") {
+          lines.push("[compaction: earlier history was summarized]")
+        }
+      }
+    }
+  }
+  return lines.join("\n")
+}
+
+function advisorPrompt(input: {
+  transcript: string
   trigger: Advisor.Trigger
   stepsSinceLastReview: number
   previousReviews: Advisor.Review[]
   reason?: string
 }) {
-  return [
+  const body = [
     "You are now acting as a senior engineering advisor reviewing the work performed by the primary coding agent.",
-    "You have access to the conversation and work history inherited from the primary session up to this review point. Read it carefully before responding.",
+    "The visible conversation transcript of the primary session up to this review point is provided above: everything since the last compaction, with the compaction summary standing in for earlier work — the same view the primary agent gets. Read it carefully before responding.",
     "Your task is not to implement anything. Determine the goal, reconstruct the reasoning and investigation so far, assess the current direction and assumptions, identify loops or missed architectural considerations, and recommend the next useful action or experiment. If the current direction is sound, say so explicitly.",
     "Return concise but technically substantive guidance to the primary agent. Do not modify files, execute implementation commands, or create subagents.",
     "Respond in ordinary plain text, using concise paragraphs or bullets where useful. Do not return JSON or a fixed schema.",
@@ -83,11 +136,20 @@ function reviewPrompt(input: {
     `Steps since previous review: ${input.stepsSinceLastReview}`,
     ...(input.previousReviews.length
       ? [
-          "Previous Advisor reviews (supplemental; the full conversation remains primary):",
+          "Previous Advisor reviews (supplemental; the full transcript remains primary):",
           ...input.previousReviews.map((review) => `- Cycle ${review.cycle}: ${review.response}`),
         ]
       : []),
     ...(input.reason ? ["", "The user additionally wants the following reviewed:", input.reason] : []),
+  ].join("\n")
+  if (input.transcript.trim().length === 0) return body
+  return [
+    "Conversation transcript of the session under review (visible history since the last compaction):",
+    "<<<transcript",
+    input.transcript,
+    "transcript>>>",
+    "",
+    body,
   ].join("\n")
 }
 
@@ -97,6 +159,7 @@ const layer = Layer.effect(
     const config = yield* Config.Service
     const agents = yield* Agent.Service
     const sessions = yield* Session.Service
+    const database = yield* Database.Service
     const global = yield* Global.Service
     const modelpick = yield* ModelPick.Service
 
@@ -165,7 +228,12 @@ const layer = Layer.effect(
       sessionID: SessionID
       trigger: Advisor.Trigger
       reason?: string
+      model?: { providerID: ProviderV2.ID; modelID: ModelV2.ID }
       promptOps: TaskPromptOps
+      onChild?: (input: {
+        sessionID: SessionID
+        model: { providerID: ProviderV2.ID; modelID: ModelV2.ID }
+      }) => Effect.Effect<void>
     }) {
       const s = yield* settings()
       if (!s.enabled) return yield* new AdvisorError({ message: "Advisor is disabled in config" })
@@ -189,34 +257,47 @@ const layer = Layer.effect(
       try {
         const parent = yield* sessions.get(input.sessionID).pipe(Effect.orDie)
 
+        // Precedence: advisor model chosen via /advisor-model (stored over agent
+        // config), then the caller's default, then the parent session's model.
+        // A configured advisor model intentionally shadows input.model, which
+        // callers pass as a convenience default rather than a user choice.
         const configured = yield* getConfiguredModel(input.sessionID)
-        const model = configured ?? {
-          modelID: ModelV2.ID.make(parent.model?.id ?? "unknown"),
-          providerID: ProviderV2.ID.make(parent.model?.providerID ?? "unknown"),
-        }
+        const model = configured ??
+          input.model ?? {
+            modelID: ModelV2.ID.make(parent.model?.id ?? "unknown"),
+            providerID: ProviderV2.ID.make(parent.model?.providerID ?? "unknown"),
+          }
 
-        const child = yield* sessions.fork({ sessionID: input.sessionID }).pipe(Effect.orDie)
+        // The advisor sees the same visible history the main loop gives the model:
+        // everything since the last compaction, with the compaction summary standing
+        // in for earlier work. Never serialize the full pre-compaction archive here.
+        const history = yield* MessageV2.filterCompactedEffect(input.sessionID).pipe(
+          Effect.provideService(Database.Service, database),
+        )
+        const permission: PermissionV1.Ruleset = [
+          { permission: "*", pattern: "*", action: "deny" },
+          ...["read", "grep", "glob", "list"].map((rule) => ({
+            permission: rule,
+            pattern: "*" as const,
+            action: "allow" as const,
+          })),
+        ]
+        const child = yield* sessions.create({
+          parentID: input.sessionID,
+          title: `Advisor review (@${advisor.name} subagent)`,
+          agent: advisor.name,
+          model: { id: model.modelID, providerID: model.providerID },
+          permission,
+          metadata: { advisorTemporary: true },
+        }).pipe(Effect.orDie)
+        // Everything after creation runs under the archive finalizer so a
+        // failure anywhere (hook, transcript, model call, interruption) still
+        // archives the temporary child instead of leaking it into the session
+        // list.
         const response = yield* Effect.gen(function* () {
-          yield* sessions.setAgentModel({
-            sessionID: child.id,
-            agent: advisor.name,
-            model: { id: model.modelID, providerID: model.providerID },
-            time: Date.now(),
-          })
-          yield* sessions.setPermission({
-            sessionID: child.id,
-            permission: [
-              { permission: "*", pattern: "*", action: "deny" },
-              ...["read", "grep", "glob", "list"].map((permission) => ({
-                permission,
-                pattern: "*" as const,
-                action: "allow" as const,
-              })),
-            ] satisfies PermissionV1.Ruleset,
-          })
-          const metadata = { ...child.metadata, [FULL_HISTORY_METADATA_KEY]: true }
-          yield* sessions.setMetadata({ sessionID: child.id, metadata })
-          const prompt = reviewPrompt({
+          if (input.onChild) yield* input.onChild({ sessionID: child.id, model })
+          const prompt = advisorPrompt({
+            transcript: renderTranscript(history),
             trigger: input.trigger,
             stepsSinceLastReview: current.steps,
             previousReviews: current.history,
@@ -238,14 +319,14 @@ const layer = Layer.effect(
                 ? result.info.error.data.message
                 : result.info.error.name
             if (result.info.error.name === "ContextOverflowError") {
-              return `Full-history Advisor review unavailable: ${message}. No conversation history was truncated. Use a model with a larger context window or explicitly request a narrower review.`
+              return `Advisor review unavailable: the visible session history exceeds the model's context window. No history was truncated. Use a model with a larger context window, or compact the session and review again.`
             }
             return yield* new AdvisorError({ message: `Advisor failed: ${message}` })
           }
 
           const text = result.parts.findLast((item) => item.type === "text")?.text ?? ""
           return text.trim() || "Advisor returned no usable analysis."
-        }).pipe(Effect.ensuring(sessions.remove(child.id).pipe(Effect.ignore)))
+        }).pipe(Effect.ensuring(sessions.setArchived({ sessionID: child.id })))
 
         const review: Advisor.Review = {
           sessionID: input.sessionID,
@@ -255,19 +336,19 @@ const layer = Layer.effect(
           response,
           createdAt: Date.now(),
         }
-        const history = [review, ...current.history].slice(0, 3)
+        const reviews = [review, ...current.history].slice(0, 3)
         map.set(input.sessionID, {
           steps: 0,
           cycle,
           lastReview: review,
-          history,
+          history: reviews,
           advisorRunning: false,
         })
         return review
       } catch (error) {
-        const current = map.get(input.sessionID)
-        if (current) {
-          map.set(input.sessionID, { ...current, advisorRunning: false })
+        const entry = map.get(input.sessionID)
+        if (entry) {
+          map.set(input.sessionID, { ...entry, advisorRunning: false })
         }
         if (error instanceof AdvisorError) return yield* error
         return yield* new AdvisorError({ message: error instanceof Error ? error.message : String(error) })
@@ -328,6 +409,10 @@ const layer = Layer.effect(
           "session.id": input.sessionID,
           cause: String(Cause.squash(exit.cause)),
         })
+        // Restart the step counter so the automatic review retries after the
+        // next full step window instead of re-triggering on every subsequent
+        // step until it happens to succeed.
+        map.set(input.sessionID, { ...(map.get(input.sessionID) ?? current), steps: 0, advisorRunning: false })
         return false
       }
       const review = exit.value
@@ -374,8 +459,9 @@ export const injectAdvice = Effect.fn("Advisor.injectAdvice")(function* (input: 
     messageID: msg.id,
     sessionID: input.sessionID,
     type: "text",
+    // Not synthetic: the advice must render in the main session. Synthetic
+    // text parts are hidden by the TUI and CLI transcripts.
     text: renderAdvice({ trigger: input.review.trigger, cycle: input.review.cycle, review: input.review }),
-    synthetic: true,
   } satisfies SessionV1.TextPart)
   return msg
 })
@@ -383,7 +469,7 @@ export const injectAdvice = Effect.fn("Advisor.injectAdvice")(function* (input: 
 export const node = LayerNode.make({
   service: Service,
   layer: layer,
-  deps: [Config.node, Agent.node, Session.node, Global.node, ModelPick.node],
+  deps: [Config.node, Agent.node, Session.node, Database.node, Global.node, ModelPick.node],
 })
 
 export { renderAdvice }

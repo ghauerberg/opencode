@@ -14,6 +14,8 @@ import { Effect, Exit, Schema, Scope } from "effect"
 import { EffectBridge } from "@/effect/bridge"
 import { RuntimeFlags } from "@/effect/runtime-flags"
 import { Database } from "@opencode-ai/core/database/database"
+import { Global } from "@opencode-ai/core/global"
+import { ModelPickStore } from "@/modelpick/store"
 import { ProviderV2 } from "@opencode-ai/core/provider"
 import { ModelV2 } from "@opencode-ai/core/model"
 
@@ -96,6 +98,7 @@ export const TaskTool = Tool.define(
     const scope = yield* Scope.Scope
     const flags = yield* RuntimeFlags.Service
     const database = yield* Database.Service
+    const global = yield* Global.Service
 
     const run = Effect.fn("TaskTool.execute")(function* (
       params: Schema.Schema.Type<typeof Parameters>,
@@ -186,10 +189,20 @@ export const TaskTool = Tool.define(
       if (msg.info.role !== "assistant") return yield* Effect.fail(new Error("Not an assistant message"))
       const variant = msg.info.variant
 
-      const model = params.model ?? next.model ?? {
-        modelID: msg.info.modelID,
-        providerID: msg.info.providerID,
-      }
+      // Explicit per-call model, then a model the user has saved for this
+      // subagent type (e.g. via /advisor-model), then the agent's configured
+      // model, then the parent session model.
+      const storedModel = yield* ModelPickStore.find(global.config, next.name)
+      const model =
+        params.model ??
+        (storedModel
+          ? { modelID: ModelV2.ID.make(storedModel.modelID), providerID: ProviderV2.ID.make(storedModel.providerID) }
+          : undefined) ??
+        next.model ??
+        {
+          modelID: msg.info.modelID,
+          providerID: msg.info.providerID,
+        }
       const metadata = {
         parentSessionId: ctx.sessionID,
         sessionId: nextSession.id,
@@ -214,7 +227,7 @@ export const TaskTool = Tool.define(
             modelID: model.modelID,
             providerID: model.providerID,
           },
-          variant: next.model ? undefined : variant,
+          variant: next.model || storedModel ? undefined : variant,
           agent: next.name,
           parts,
         })
