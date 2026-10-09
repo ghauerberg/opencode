@@ -518,7 +518,7 @@ export async function bootstrapDirectory(input: {
         retry(() =>
           input.sdk.modelpick
             .list({ directory: input.directory })
-            .then((result) => result.data)
+            .then((result) => result.data ?? [])
             .then((requests) => {
               const ids = requests.map((request) => request.sessionID)
               const grouped = groupBySession(
