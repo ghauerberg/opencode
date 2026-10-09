@@ -44,7 +44,7 @@ export interface Interface {
     agent: string
     model: { providerID: ProviderV2.ID; modelID: ModelV2.ID }
     promptOps: TaskPromptOps
-  }) => Effect.Effect<boolean>
+  }) => Effect.Effect<Advisor.AutoOutcome>
   /** Model chosen for the advisor, or undefined if the agent's configured model applies. */
   readonly getConfiguredModel: (
     sessionID: SessionID,
@@ -177,9 +177,10 @@ const layer = Layer.effect(
       const enabled = advisorCfg.enabled ?? true
       const agentName = advisorCfg.agent ?? "advisor"
       const every = advisorCfg.automatic?.every ?? DEFAULT_ALLOWANCE
+      const automaticEnabled = advisorCfg.automatic?.enabled ?? true
       const stepTools = advisorCfg.stepTools ?? DEFAULT_STEP_TOOLS
       const failMode = advisorCfg.failMode ?? "continue"
-      return { enabled, agentName, every, stepTools, failMode }
+      return { enabled, agentName, every, automaticEnabled, stepTools, failMode }
     })
 
     const getConfiguredModel: Interface["getConfiguredModel"] = Effect.fn("Advisor.getConfiguredModel")(function* (
@@ -326,7 +327,7 @@ const layer = Layer.effect(
 
           const text = result.parts.findLast((item) => item.type === "text")?.text ?? ""
           return text.trim() || "Advisor returned no usable analysis."
-        }).pipe(Effect.ensuring(sessions.setArchived({ sessionID: child.id })))
+        }).pipe(Effect.ensuring(sessions.setArchived({ sessionID: child.id, time: Date.now() })))
 
         const review: Advisor.Review = {
           sessionID: input.sessionID,
@@ -389,14 +390,14 @@ const layer = Layer.effect(
       promptOps: TaskPromptOps
     }) {
       const s = yield* settings()
-      if (!s.enabled) return false
-      if (s.failMode === "pause") return false
-      if (s.agentName === input.agent) return false
+      if (!s.enabled) return "none" as const
+      if (!s.automaticEnabled) return "none" as const
+      if (s.agentName === input.agent) return "none" as const
 
       const map = yield* InstanceState.get(state)
       const current = map.get(input.sessionID) ?? { ...Advisor.defaultState }
-      if (current.advisorRunning) return false
-      if (current.steps < s.every) return false
+      if (current.advisorRunning) return "none" as const
+      if (current.steps < s.every) return "none" as const
 
       yield* Effect.logInfo("auto advisor review", { "session.id": input.sessionID, steps: current.steps })
       const exit = yield* runAdvisorReview({
@@ -405,15 +406,21 @@ const layer = Layer.effect(
         promptOps: input.promptOps,
       }).pipe(Effect.exit)
       if (Exit.isFailure(exit)) {
-        yield* Effect.logWarning("auto advisor review failed, continuing", {
-          "session.id": input.sessionID,
-          cause: String(Cause.squash(exit.cause)),
-        })
+        const cause = Cause.squash(exit.cause)
+        const message = cause instanceof Error ? cause.message : String(cause)
         // Restart the step counter so the automatic review retries after the
         // next full step window instead of re-triggering on every subsequent
         // step until it happens to succeed.
         map.set(input.sessionID, { ...(map.get(input.sessionID) ?? current), steps: 0, advisorRunning: false })
-        return false
+        if (s.failMode === "pause") {
+          yield* Effect.logWarning("auto advisor review failed, pausing session", {
+            "session.id": input.sessionID,
+            message,
+          })
+          return "halt" as const
+        }
+        yield* Effect.logWarning("auto advisor review failed, continuing", { "session.id": input.sessionID, message })
+        return "none" as const
       }
       const review = exit.value
       yield* injectAdvice({
@@ -422,7 +429,7 @@ const layer = Layer.effect(
         model: input.model,
         review,
       }).pipe(Effect.provideService(Session.Service, sessions))
-      return true
+      return "reviewed" as const
     })
 
     return Service.of({

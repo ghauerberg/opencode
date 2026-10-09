@@ -272,7 +272,7 @@ describe("advisor", () => {
         promptOps: stubOps(advisorText),
       })
       // The review fails (no such agent) and the session keeps working...
-      expect(triggered).toBe(false)
+      expect(triggered).toBe("none")
       // ...and the counter restarts instead of retrying on every next step.
       expect(yield* advisor.getState(chat.id)).toMatchObject({ steps: 0, advisorRunning: false })
       yield* advisor.step({ sessionID: chat.id, tool: "read", agent: "build" })
@@ -325,7 +325,7 @@ describe("advisor", () => {
           model: ref,
           promptOps: stubOps(advisorText),
         })
-        expect(triggered).toBe(true)
+        expect(triggered).toBe("reviewed")
 
         const after = yield* advisor.getState(chat.id)
         expect(after.cycle).toBe(1)
@@ -362,7 +362,7 @@ describe("advisor", () => {
           model: ref,
           promptOps: stubOps(advisorText),
         })
-        expect(notYet).toBe(false)
+        expect(notYet).toBe("none")
       }),
     advisorConfig,
   )
@@ -384,7 +384,7 @@ describe("advisor", () => {
           promptOps: stubOps(advisorText),
         })
         // The built-in advisor agent exists, so this triggers; history is recorded.
-        expect(triggered).toBe(true)
+        expect(triggered).toBe("reviewed")
         const after = yield* advisor.getState(chat.id)
         expect(after.history).toHaveLength(1)
       }),
@@ -551,7 +551,7 @@ describe("advisor", () => {
           model: ref,
           promptOps: stubOps(advisorText),
         })
-        expect(triggered).toBe(true)
+        expect(triggered).toBe("reviewed")
 
         const after = yield* advisor.getState(chat.id)
         expect(after.cycle).toBe(1)
@@ -565,7 +565,7 @@ describe("advisor", () => {
           model: ref,
           promptOps: stubOps(advisorText),
         })
-        expect(again).toBe(true)
+        expect(again).toBe("reviewed")
         const final = yield* advisor.getState(chat.id)
         expect(final.cycle).toBe(2)
         expect(final.history).toHaveLength(2)
@@ -640,7 +640,7 @@ describe("advisor", () => {
           model: ref,
           promptOps: stubOpsWithCapture(advisorText, (input) => (promptModel = input.model)),
         })
-        expect(triggered).toBe(true)
+        expect(triggered).toBe("reviewed")
         expect(promptModel).toEqual({ providerID: "advisor-provider", modelID: "advisor-model" })
       }),
     advisorConfig,
@@ -695,5 +695,64 @@ describe("advisor", () => {
         expect(yield* modelpick.list()).toHaveLength(0)
       }),
     advisorConfig,
+  )
+
+  it.instance(
+    "automatic reviews can be disabled via advisor.automatic.enabled",
+    () =>
+      Effect.gen(function* () {
+        const advisor = yield* Advisor.Service
+        const { chat } = yield* seed()
+        for (let index = 0; index < 3; index++)
+          yield* advisor.step({ sessionID: chat.id, tool: "read", agent: "build" })
+
+        const outcome = yield* advisor.maybeAutoReview({
+          sessionID: chat.id,
+          agent: "build",
+          model: ref,
+          promptOps: stubOps(advisorText),
+        })
+        expect(outcome).toBe("none")
+        // The steps still accumulate; only the automatic trigger is disabled.
+        expect((yield* advisor.getState(chat.id)).steps).toBe(3)
+      }),
+    {
+      config: {
+        advisor: {
+          automatic: { enabled: false, every: 3 },
+        },
+      },
+    },
+  )
+
+  it.instance(
+    "failMode 'pause' halts instead of continuing when an automatic review fails",
+    () =>
+      Effect.gen(function* () {
+        const advisor = yield* Advisor.Service
+        const { chat } = yield* seed()
+        for (let index = 0; index < 3; index++)
+          yield* advisor.step({ sessionID: chat.id, tool: "read", agent: "build" })
+
+        // The review fails because the configured advisor agent does not exist.
+        const outcome = yield* advisor.maybeAutoReview({
+          sessionID: chat.id,
+          agent: "build",
+          model: ref,
+          promptOps: stubOps(advisorText),
+        })
+        expect(outcome).toBe("halt")
+        // The counter still resets so a later resume does not immediately retry.
+        expect(yield* advisor.getState(chat.id)).toMatchObject({ steps: 0, advisorRunning: false })
+      }),
+    {
+      config: {
+        advisor: {
+          agent: "missing-advisor",
+          failMode: "pause",
+          automatic: { every: 3 },
+        },
+      },
+    },
   )
 })

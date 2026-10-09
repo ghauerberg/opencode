@@ -1109,13 +1109,26 @@ const layer = Layer.effect(
           // Advisor auto-review checkpoint: when the counted step allowance is
           // reached, run the advisor synchronously (blocking the loop) and inject
           // the advice as a user message before the next model turn, so the
-          // main session genuinely pauses until the review completes.
+          // main session genuinely pauses until the review completes. A failed
+          // review either continues (default) or pauses the session when
+          // advisor.failMode is "pause".
           const promptOps = yield* ops()
-          if (
-            yield* advisor.maybeAutoReview({ sessionID, agent: session.agent ?? "", model: lastUser.model, promptOps })
-          ) {
-            continue
+          const autoReview = yield* advisor.maybeAutoReview({
+            sessionID,
+            agent: session.agent ?? "",
+            model: lastUser.model,
+            promptOps,
+          })
+          if (autoReview === "halt") {
+            yield* events.publish(Session.Event.Error, {
+              sessionID,
+              error: new NamedError.Unknown({
+                message: 'Automatic advisor review failed; the session is paused (advisor.failMode = "pause").',
+              }).toObject(),
+            })
+            break
           }
+          if (autoReview === "reviewed") continue
 
           const lastAssistantMsg = msgs.findLast(
             (msg) => msg.info.role === "assistant" && msg.info.id === lastAssistant?.id,
