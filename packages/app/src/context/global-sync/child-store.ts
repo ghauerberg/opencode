@@ -237,6 +237,7 @@ export function createChildStoreManager(input: {
             todo: {},
             permission: {},
             question: {},
+            modelpick: {},
             get mcp_ready() {
               return !mcpQuery.isLoading
             },

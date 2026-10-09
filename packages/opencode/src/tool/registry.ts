@@ -4,6 +4,8 @@ import { Ripgrep } from "@opencode-ai/core/ripgrep"
 import { PlanExitTool } from "./plan"
 import { Session } from "@/session/session"
 import { QuestionTool } from "./question"
+import { ConsultTool } from "./consult"
+import { AdvisorTool } from "./advisor"
 import { ShellTool } from "./shell"
 import { EditTool } from "./edit"
 import { GlobTool } from "./glob"
@@ -18,6 +20,9 @@ import { InvalidTool } from "./invalid"
 import { SkillTool } from "./skill"
 import * as Tool from "./tool"
 import { Config } from "@/config/config"
+import { Global } from "@opencode-ai/core/global"
+import { ModelPick } from "@/modelpick"
+import { Advisor } from "@/advisor"
 import { type ToolContext as PluginToolContext, type ToolDefinition } from "@opencode-ai/plugin"
 import type { JSONSchema7, JSONSchema7Definition } from "@ai-sdk/provider"
 import { Schema } from "effect"
@@ -102,6 +107,8 @@ const layer = Layer.effect(
     const task = yield* TaskTool
     const read = yield* ReadTool
     const question = yield* QuestionTool
+    const consult = yield* ConsultTool
+    const advisor = yield* AdvisorTool
     const todo = yield* TodoWriteTool
     const lsptool = yield* LspTool
     const plan = yield* PlanExitTool
@@ -221,6 +228,8 @@ const layer = Layer.effect(
           skill: Tool.init(skilltool),
           patch: Tool.init(patchtool),
           question: Tool.init(question),
+          consult: Tool.init(consult),
+          advisor: Tool.init(advisor),
           lsp: Tool.init(lsptool),
           plan: Tool.init(plan),
           ...(codeModeTool ? { execute: Tool.init(codeModeTool) } : {}),
@@ -243,6 +252,8 @@ const layer = Layer.effect(
             tool.search,
             tool.skill,
             tool.patch,
+            tool.consult,
+            tool.advisor,
             ...(tool.execute ? [tool.execute] : []),
             ...(flags.experimentalLspTool ? [tool.lsp] : []),
             ...(flags.experimentalPlanMode && flags.client === "cli" ? [tool.plan] : []),
@@ -275,6 +286,17 @@ const layer = Layer.effect(
         )
         .join("\n")
       return ["Available agent types and the tools they have access to:", description].join("\n")
+    })
+
+    const describeConsult = Effect.fn("ToolRegistry.describeConsult")(function* (agent: Agent.Info) {
+      const items = (yield* agents.list()).filter((item) => item.mode !== "primary" && item.hidden !== true)
+      const filtered = items.filter(
+        (item) => Permission.evaluate("consult", item.name, agent.permission).action !== "deny",
+      )
+      if (filtered.length === 0) return ""
+      const list = filtered.toSorted((a, b) => a.name.localeCompare(b.name))
+      const description = list.map((item) => `- ${item.name}: ${item.description ?? "Advisory role"}`).join("\n")
+      return ["Advisory roles you can escalate to via the consult tool:", description].join("\n")
     })
 
     const describeCodeMode = Effect.fn("ToolRegistry.describeCodeMode")(function* (input: {
@@ -325,6 +347,7 @@ const layer = Layer.effect(
             description: [
               output.description,
               tool.id === TaskTool.id ? yield* describeTask(input.agent) : undefined,
+              tool.id === ConsultTool.id ? yield* describeConsult(input.agent) : undefined,
               tool.id === "execute" ? codeModeDescription : undefined,
             ]
               .filter(Boolean)
@@ -431,6 +454,9 @@ export const node = LayerNode.make({
     Config.node,
     Plugin.node,
     Question.node,
+    ModelPick.node,
+    Global.node,
+    Advisor.node,
     Todo.node,
     Agent.node,
     Skill.node,

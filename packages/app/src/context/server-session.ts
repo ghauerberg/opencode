@@ -3,6 +3,7 @@ import { retry } from "@opencode-ai/core/util/retry"
 import type { OpenCodeEvent, SessionApi, SessionMessageInfo } from "@opencode-ai/client/promise"
 import type {
   Message,
+  ModelPickRequest,
   OpencodeClient,
   Part,
   PermissionRequest,
@@ -200,6 +201,7 @@ export function createServerSession(
     todo: {} as Record<string, Todo[]>,
     permission: {} as Record<string, PermissionRequest[]>,
     question: {} as Record<string, QuestionRequest[]>,
+    modelpick: {} as Record<string, ModelPickRequest[]>,
     message: {} as Record<string, Message[]>,
     session_message: {} as Record<string, SessionMessageInfo[]>,
     part: {} as Record<string, Part[]>,
@@ -273,6 +275,9 @@ export function createServerSession(
           .filter(([, items]) => items.length > 0)
           .map(([sessionID]) => sessionID),
         ...Object.entries(data.question)
+          .filter(([, items]) => items.length > 0)
+          .map(([sessionID]) => sessionID),
+        ...Object.entries(data.modelpick)
           .filter(([, items]) => items.length > 0)
           .map(([sessionID]) => sessionID),
         ...Object.entries(data.session_status)
@@ -522,6 +527,9 @@ export function createServerSession(
         .filter(([, items]) => items.length > 0)
         .map(([sessionID]) => sessionID),
       ...Object.entries(data.question)
+        .filter(([, items]) => items.length > 0)
+        .map(([sessionID]) => sessionID),
+      ...Object.entries(data.modelpick)
         .filter(([, items]) => items.length > 0)
         .map(([sessionID]) => sessionID),
       ...Object.entries(data.session_status)
@@ -1289,6 +1297,38 @@ export function createServerSession(
             if (result.found) draft.splice(result.index, 1)
           }),
         )
+        return
+      }
+      case "modelpick.asked": {
+        const request = event.properties as ModelPickRequest
+        const requests = data.modelpick[request.sessionID]
+        if (!requests) {
+          setData("modelpick", request.sessionID, [request])
+          return
+        }
+        const result = Binary.search(requests, request.id, (item) => item.id)
+        if (result.found) setData("modelpick", request.sessionID, result.index, reconcile(request))
+        if (!result.found)
+          setData(
+            "modelpick",
+            request.sessionID,
+            produce((draft) => void draft.splice(result.index, 0, request)),
+          )
+        return
+      }
+      case "modelpick.replied":
+      case "modelpick.rejected": {
+        const props = event.properties as { sessionID: string; requestID: string }
+        setData(
+          "modelpick",
+          props.sessionID,
+          produce((draft) => {
+            if (!draft) return
+            const result = Binary.search(draft, props.requestID, (item) => item.id)
+            if (result.found) draft.splice(result.index, 1)
+          }),
+        )
+        return
       }
     }
   }

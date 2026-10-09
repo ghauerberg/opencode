@@ -2,7 +2,7 @@ import type { JSX } from "solid-js"
 import { DockShell, DockTray } from "@opencode-ai/ui/dock-surface"
 
 export function DockPrompt(props: {
-  kind: "question" | "permission"
+  kind: "question" | "permission" | "modelpick"
   header: JSX.Element
   children: JSX.Element
   footer: JSX.Element

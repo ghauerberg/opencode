@@ -67,6 +67,9 @@ export type Event =
   | EventQuestionV2Asked
   | EventQuestionV2Replied
   | EventQuestionV2Rejected
+  | EventModelpickAsked
+  | EventModelpickReplied
+  | EventModelpickRejected
   | EventTodoUpdated
   | EventLspUpdated
   | EventPermissionAsked
@@ -653,6 +656,22 @@ export type Pty = {
   status: "running" | "exited"
   pid: number
   exitCode?: number
+}
+
+export type ModelPickTool = {
+  messageID: string
+  callID: string
+}
+
+export type ModelPickAnswer = {
+  /**
+   * Provider of the selected model
+   */
+  providerID: string
+  /**
+   * Model to run the advisor on
+   */
+  modelID: string
 }
 
 export type Todo = {
@@ -1360,6 +1379,37 @@ export type GlobalEvent = {
       }
     | {
         id: string
+        type: "modelpick.asked"
+        properties: {
+          id: string
+          sessionID: string
+          /**
+           * Advisory role being consulted (e.g. 'architect')
+           */
+          role: string
+          subproblem?: string
+          tool?: ModelPickTool
+        }
+      }
+    | {
+        id: string
+        type: "modelpick.replied"
+        properties: {
+          sessionID: string
+          requestID: string
+          answer: ModelPickAnswer
+        }
+      }
+    | {
+        id: string
+        type: "modelpick.rejected"
+        properties: {
+          sessionID: string
+          requestID: string
+        }
+      }
+    | {
+        id: string
         type: "todo.updated"
         properties: {
           sessionID: string
@@ -1654,6 +1704,17 @@ export type ServerConfig = {
   cors?: Array<string>
 }
 
+export type AdvisorConfig = {
+  enabled?: boolean
+  agent?: string
+  automatic?: {
+    enabled?: boolean
+    every?: number
+  }
+  stepTools?: Array<string>
+  failMode?: "continue" | "pause"
+}
+
 export type PermissionActionConfig = "ask" | "allow" | "deny"
 
 export type PermissionObjectConfig = {
@@ -1672,6 +1733,7 @@ export type PermissionConfig =
       list?: PermissionRuleConfig
       bash?: PermissionRuleConfig
       task?: PermissionRuleConfig
+      consult?: PermissionRuleConfig
       external_directory?: PermissionRuleConfig
       todowrite?: PermissionActionConfig
       question?: PermissionActionConfig
@@ -1905,6 +1967,7 @@ export type Config = {
     paths?: Array<string>
     urls?: Array<string>
   }
+  advisor?: AdvisorConfig
   references?: {
     [key: string]: string | ConfigV2ReferenceGit | ConfigV2ReferenceLocal
   }
@@ -1947,6 +2010,7 @@ export type Config = {
     build?: AgentConfig
     general?: AgentConfig
     explore?: AgentConfig
+    advisor?: AgentConfig
     title?: AgentConfig
     summary?: AgentConfig
     compaction?: AgentConfig
@@ -2468,6 +2532,34 @@ export type QuestionNotFoundError = {
   message: string
 }
 
+export type ModelPickRequest = {
+  id: string
+  sessionID: string
+  /**
+   * Advisory role being consulted (e.g. 'architect')
+   */
+  role: string
+  subproblem?: string
+  tool?: ModelPickTool
+}
+
+export type ModelPickReplyPayload = {
+  /**
+   * Provider of the selected model
+   */
+  providerID: string
+  /**
+   * Model to run the advisor on
+   */
+  modelID: string
+}
+
+export type ModelPickNotFoundError = {
+  _tag: "ModelPickNotFoundError"
+  requestID: string
+  message: string
+}
+
 export type PermissionRequest = {
   id: string
   sessionID: string
@@ -2918,6 +3010,9 @@ export type V2Event =
   | QuestionV2Asked
   | QuestionV2Replied
   | QuestionV2Rejected
+  | ModelpickAsked
+  | ModelpickReplied
+  | ModelpickRejected
   | TodoUpdated
   | LspUpdated
   | PermissionAsked
@@ -5661,6 +5756,67 @@ export type QuestionV2Rejected = {
   }
 }
 
+export type ModelpickAsked = {
+  id: string
+  metadata?: {
+    [key: string]: unknown
+  }
+  type: "modelpick.asked"
+  durable?: {
+    aggregateID: string
+    seq: number
+    version: number
+  }
+  location?: LocationRef
+  data: {
+    id: string
+    sessionID: string
+    /**
+     * Advisory role being consulted (e.g. 'architect')
+     */
+    role: string
+    subproblem?: string
+    tool?: ModelPickTool
+  }
+}
+
+export type ModelpickReplied = {
+  id: string
+  metadata?: {
+    [key: string]: unknown
+  }
+  type: "modelpick.replied"
+  durable?: {
+    aggregateID: string
+    seq: number
+    version: number
+  }
+  location?: LocationRef
+  data: {
+    sessionID: string
+    requestID: string
+    answer: ModelPickAnswer
+  }
+}
+
+export type ModelpickRejected = {
+  id: string
+  metadata?: {
+    [key: string]: unknown
+  }
+  type: "modelpick.rejected"
+  durable?: {
+    aggregateID: string
+    seq: number
+    version: number
+  }
+  location?: LocationRef
+  data: {
+    sessionID: string
+    requestID: string
+  }
+}
+
 export type TodoUpdated = {
   id: string
   metadata?: {
@@ -6836,6 +6992,40 @@ export type EventQuestionV2Replied = {
 export type EventQuestionV2Rejected = {
   id: string
   type: "question.v2.rejected"
+  properties: {
+    sessionID: string
+    requestID: string
+  }
+}
+
+export type EventModelpickAsked = {
+  id: string
+  type: "modelpick.asked"
+  properties: {
+    id: string
+    sessionID: string
+    /**
+     * Advisory role being consulted (e.g. 'architect')
+     */
+    role: string
+    subproblem?: string
+    tool?: ModelPickTool
+  }
+}
+
+export type EventModelpickReplied = {
+  id: string
+  type: "modelpick.replied"
+  properties: {
+    sessionID: string
+    requestID: string
+    answer: ModelPickAnswer
+  }
+}
+
+export type EventModelpickRejected = {
+  id: string
+  type: "modelpick.rejected"
   properties: {
     sessionID: string
     requestID: string
@@ -9235,6 +9425,102 @@ export type QuestionRejectResponses = {
 }
 
 export type QuestionRejectResponse = QuestionRejectResponses[keyof QuestionRejectResponses]
+
+export type ModelpickListData = {
+  body?: never
+  path?: never
+  query?: {
+    directory?: string
+    workspace?: string
+  }
+  url: "/modelpick"
+}
+
+export type ModelpickListErrors = {
+  /**
+   * Bad request
+   */
+  400: BadRequestError
+}
+
+export type ModelpickListError = ModelpickListErrors[keyof ModelpickListErrors]
+
+export type ModelpickListResponses = {
+  /**
+   * List of pending model pick requests
+   */
+  200: Array<ModelPickRequest>
+}
+
+export type ModelpickListResponse = ModelpickListResponses[keyof ModelpickListResponses]
+
+export type ModelpickReplyData = {
+  body?: ModelPickReplyPayload
+  path: {
+    requestID: string
+  }
+  query?: {
+    directory?: string
+    workspace?: string
+  }
+  url: "/modelpick/{requestID}/reply"
+}
+
+export type ModelpickReplyErrors = {
+  /**
+   * BadRequest | InvalidRequestError
+   */
+  400: EffectHttpApiErrorBadRequest | InvalidRequestError
+  /**
+   * ModelPickNotFoundError
+   */
+  404: ModelPickNotFoundError
+}
+
+export type ModelpickReplyError = ModelpickReplyErrors[keyof ModelpickReplyErrors]
+
+export type ModelpickReplyResponses = {
+  /**
+   * Model pick answered successfully
+   */
+  200: boolean
+}
+
+export type ModelpickReplyResponse = ModelpickReplyResponses[keyof ModelpickReplyResponses]
+
+export type ModelpickRejectData = {
+  body?: never
+  path: {
+    requestID: string
+  }
+  query?: {
+    directory?: string
+    workspace?: string
+  }
+  url: "/modelpick/{requestID}/reject"
+}
+
+export type ModelpickRejectErrors = {
+  /**
+   * BadRequest | InvalidRequestError
+   */
+  400: EffectHttpApiErrorBadRequest | InvalidRequestError
+  /**
+   * ModelPickNotFoundError
+   */
+  404: ModelPickNotFoundError
+}
+
+export type ModelpickRejectError = ModelpickRejectErrors[keyof ModelpickRejectErrors]
+
+export type ModelpickRejectResponses = {
+  /**
+   * Model pick rejected successfully
+   */
+  200: boolean
+}
+
+export type ModelpickRejectResponse = ModelpickRejectResponses[keyof ModelpickRejectResponses]
 
 export type PermissionListData = {
   body?: never

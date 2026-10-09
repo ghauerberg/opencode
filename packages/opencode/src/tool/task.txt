@@ -2,6 +2,8 @@ Launch a new agent to handle complex, multistep tasks autonomously.
 
 When using the Task tool, you must specify a subagent_type parameter to select which agent type to use.
 
+Use the optional model parameter to run the subagent on a specific provider/model without changing the parent session's active model.
+
 When NOT to use the Task tool:
 - If you want to read a specific file path, use the Read or Glob tool instead of the Task tool, to find the match more quickly
 - If you are searching for a specific class definition like "class Foo", use the Grep tool instead, to find the match more quickly

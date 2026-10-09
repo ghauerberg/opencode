@@ -19,6 +19,8 @@ import { Agent } from "@/agent/agent"
 import { Skill } from "@/skill"
 import { Discovery } from "@/skill/discovery"
 import { Question } from "@/question"
+import { ModelPick } from "@/modelpick"
+import { Advisor } from "@/advisor"
 import { Permission } from "@/permission"
 import { Todo } from "@/session/todo"
 import { Session } from "@/session/session"
@@ -74,6 +76,8 @@ export const AppLayer = AppNodeBuilderV1.build(
     Skill.node,
     Discovery.node,
     Question.node,
+    ModelPick.node,
+    Advisor.node,
     Permission.node,
     Todo.node,
     Session.node,

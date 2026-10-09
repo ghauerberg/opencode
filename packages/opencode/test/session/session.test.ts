@@ -228,13 +228,14 @@ describe("Session", () => {
         session.remove(info.id).pipe(Effect.ignore),
       )
       const saved = yield* session.get(created.id)
-      const fork = yield* Effect.acquireRelease(session.fork({ sessionID: created.id }), (info) =>
+      const fork = yield* Effect.acquireRelease(session.fork({ sessionID: created.id, parentID: created.id }), (info) =>
         session.remove(info.id).pipe(Effect.ignore),
       )
 
       expect(saved.metadata).toEqual(meta)
       expect(fork.metadata).toEqual(meta)
       expect(fork.metadata).not.toBe(meta)
+      expect(fork.parentID).toBe(created.id)
     }),
   )
 
@@ -280,6 +281,23 @@ describe("Session", () => {
 
       expect(created.metadata).toBeUndefined()
       expect(saved.metadata).toBeUndefined()
+    }),
+  )
+
+  it.instance("setArchived writes the provided timestamp and never silently stamps now", () =>
+    Effect.gen(function* () {
+      const session = yield* SessionNs.Service
+      const created = yield* Effect.acquireRelease(session.create({ title: "archive" }), (info) =>
+        session.remove(info.id).pipe(Effect.ignore),
+      )
+
+      yield* session.setArchived({ sessionID: created.id, time: 123 })
+      expect((yield* session.get(created.id)).time.archived).toBe(123)
+
+      // Omitting the timestamp must not silently stamp "now"; the stored value
+      // is left untouched so callers control the archive marker explicitly.
+      yield* session.setArchived({ sessionID: created.id })
+      expect((yield* session.get(created.id)).time.archived).toBe(123)
     }),
   )
 })

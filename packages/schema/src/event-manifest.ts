@@ -17,6 +17,7 @@ import { Plugin } from "./plugin"
 import { Project } from "./project"
 import { ProjectDirectories } from "./project-directories"
 import { Pty } from "./pty"
+import { ModelPickV1 } from "./model-pick-v1"
 import { Question } from "./question"
 import { QuestionV1 } from "./question-v1"
 import { Reference } from "./reference"
@@ -52,6 +53,7 @@ const featureDefinitions = Event.inventory(
   ...FileSystemWatcher.Event.Definitions,
   ...Pty.Event.Definitions,
   ...Question.Event.Definitions,
+  ...ModelPickV1.Event.Definitions,
 )
 
 export const ServerDefinitions = Event.inventory(

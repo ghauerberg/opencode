@@ -43,6 +43,99 @@ exports[`tool parameters JSON Schema (wire shape) bash 1`] = `
 }
 `;
 
+exports[`tool parameters JSON Schema (wire shape) consult 1`] = `
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "properties": {
+    "attempted": {
+      "description": "Approaches already tried and their results",
+      "items": {
+        "type": "string",
+      },
+      "type": "array",
+    },
+    "blocker": {
+      "description": "What specifically prevents progress",
+      "type": "string",
+    },
+    "confidence": {
+      "description": "Your 0-1 confidence that the current approach will succeed on its own",
+      "maximum": 1,
+      "minimum": 0,
+      "type": "number",
+    },
+    "evidence": {
+      "description": "Optional supporting detail, especially for web/browser issues",
+      "properties": {
+        "consoleErrors": {
+          "items": {
+            "type": "string",
+          },
+          "type": "array",
+        },
+        "domSnapshot": {
+          "type": "string",
+        },
+        "networkFailures": {
+          "items": {
+            "type": "string",
+          },
+          "type": "array",
+        },
+        "relevantFiles": {
+          "items": {
+            "type": "string",
+          },
+          "type": "array",
+        },
+        "reproduction": {
+          "items": {
+            "type": "string",
+          },
+          "type": "array",
+        },
+        "screenshots": {
+          "items": {
+            "type": "string",
+          },
+          "type": "array",
+        },
+        "url": {
+          "type": "string",
+        },
+        "viewport": {
+          "type": "string",
+        },
+      },
+      "type": "object",
+    },
+    "explanation": {
+      "description": "What you were trying to do and why it is failing",
+      "type": "string",
+    },
+    "question": {
+      "description": "A focused question about what to try next",
+      "type": "string",
+    },
+    "role": {
+      "description": "The advisory agent to escalate to (e.g. 'architect')",
+      "type": "string",
+    },
+    "subproblem": {
+      "description": "A short name for the current subproblem",
+      "type": "string",
+    },
+  },
+  "required": [
+    "role",
+    "subproblem",
+    "confidence",
+    "question",
+  ],
+  "type": "object",
+}
+`;
+
 exports[`tool parameters JSON Schema (wire shape) edit 1`] = `
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
@@ -312,6 +405,22 @@ exports[`tool parameters JSON Schema (wire shape) task 1`] = `
     "description": {
       "description": "A short (3-5 words) description of the task",
       "type": "string",
+    },
+    "model": {
+      "description": "The model to use for the subagent instead of the parent session model",
+      "properties": {
+        "modelID": {
+          "type": "string",
+        },
+        "providerID": {
+          "type": "string",
+        },
+      },
+      "required": [
+        "providerID",
+        "modelID",
+      ],
+      "type": "object",
     },
     "prompt": {
       "description": "The task for the agent to perform",

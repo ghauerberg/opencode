@@ -16,6 +16,7 @@ import { ConfigPluginV1 } from "./plugin"
 import { ConfigProviderV1 } from "./provider"
 import { ConfigServerV1 } from "./server"
 import { ConfigSkillsV1 } from "./skills"
+import { ConfigAdvisorV1 } from "./advisor"
 
 export type Layout = ConfigLayoutV1.Layout
 
@@ -42,6 +43,9 @@ export const Info = Schema.Struct({
     description: "Command configuration, see https://opencode.ai/docs/commands",
   }),
   skills: Schema.optional(ConfigSkillsV1.Info).annotate({ description: "Additional skill folder paths" }),
+  advisor: Schema.optional(ConfigAdvisorV1.Info).annotate({
+    description: "Advisor configuration: periodic strategic reviews from a read-only advisory subagent",
+  }),
   references: Schema.optional(ConfigReference.Info).annotate({
     description: "Named git or local directory references",
   }),
@@ -100,6 +104,7 @@ export const Info = Schema.Struct({
         build: Schema.optional(ConfigAgentV1.Info),
         general: Schema.optional(ConfigAgentV1.Info),
         explore: Schema.optional(ConfigAgentV1.Info),
+        advisor: Schema.optional(ConfigAgentV1.Info),
         title: Schema.optional(ConfigAgentV1.Info),
         summary: Schema.optional(ConfigAgentV1.Info),
         compaction: Schema.optional(ConfigAgentV1.Info),

@@ -1,7 +1,7 @@
 import { describe, expect, test } from "bun:test"
-import type { PermissionRequest, QuestionRequest, Session } from "@opencode-ai/sdk/v2/client"
+import type { ModelPickRequest, PermissionRequest, QuestionRequest, Session } from "@opencode-ai/sdk/v2/client"
 import { todoDockAtBoundary, todoState } from "./session-composer-state"
-import { sessionPermissionRequest, sessionQuestionRequest } from "./session-request-tree"
+import { sessionModelPickRequest, sessionPermissionRequest, sessionQuestionRequest } from "./session-request-tree"
 
 const session = (input: { id: string; parentID?: string }) =>
   ({
@@ -21,6 +21,13 @@ const question = (id: string, sessionID: string) =>
     sessionID,
     questions: [],
   }) as QuestionRequest
+
+const modelpick = (id: string, sessionID: string) =>
+  ({
+    id,
+    sessionID,
+    role: "advisor",
+  }) as ModelPickRequest
 
 describe("sessionPermissionRequest", () => {
   test("prefers the current session permission", () => {
@@ -102,6 +109,31 @@ describe("sessionQuestionRequest", () => {
     }
 
     expect(sessionQuestionRequest(sessions, questions, "root")?.id).toBe("q-grand")
+  })
+})
+
+describe("sessionModelPickRequest", () => {
+  test("prefers the current session model pick", () => {
+    const sessions = [session({ id: "root" }), session({ id: "child", parentID: "root" })]
+    const requests = {
+      root: [modelpick("mpk-root", "root")],
+      child: [modelpick("mpk-child", "child")],
+    }
+
+    expect(sessionModelPickRequest(sessions, requests, "root")?.id).toBe("mpk-root")
+  })
+
+  test("returns a nested child model pick", () => {
+    const sessions = [
+      session({ id: "root" }),
+      session({ id: "child", parentID: "root" }),
+      session({ id: "grand", parentID: "child" }),
+    ]
+    const requests = {
+      grand: [modelpick("mpk-grand", "grand")],
+    }
+
+    expect(sessionModelPickRequest(sessions, requests, "root")?.id).toBe("mpk-grand")
   })
 })
 

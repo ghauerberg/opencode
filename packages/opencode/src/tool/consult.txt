@@ -1,0 +1,21 @@
+Use this tool when you are stuck, unsure how to proceed, or repeatedly failing on the current subproblem. It escalates the subproblem to a configured advisory role (for example "architect" or "debugger") that returns guidance instead of continuing to retry the same approach.
+
+Before calling, assign the current subproblem an honest confidence score from 0 to 1: how likely you are to resolve it on your own with the approach you are currently trying.
+
+Call this tool when:
+- Your confidence in the current approach is low.
+- You have failed the same attempt multiple times.
+- A test, error, or observed behavior contradicts your understanding.
+- You have spent several steps without meaningful progress.
+
+Do NOT call this tool to delegate ordinary implementation work; that is the `task` tool. `consult` returns advice only, and the advisor cannot edit files. For a whole-session strategic review rather than a single subproblem, use the `advisor_review` tool.
+
+Fields:
+- `role`: the name of the advisory agent to escalate to (e.g. "architect").
+- `subproblem`: a short name for the current subproblem.
+- `confidence`: your 0-1 confidence that the current approach will succeed.
+- `explanation`: what you were trying to do and why it is failing.
+- `attempted`: what you already tried and the result of each attempt.
+- `blocker`: what specifically prevents progress.
+- `question`: a focused question about what to try next.
+- `evidence`: optional supporting detail, especially for web/browser issues. Include `url`, `viewport`, `consoleErrors`, `networkFailures`, `domSnapshot`, `reproduction` steps, `relevantFiles`, and file paths to any screenshots under `screenshots`.

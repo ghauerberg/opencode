@@ -61,6 +61,7 @@ function directoryState() {
     todo: {},
     permission: {},
     question: {},
+    modelpick: {},
     mcp_ready: true,
     mcp: {},
     mcp_resource: {},
@@ -109,6 +110,7 @@ describe("bootstrapDirectory", () => {
         },
         permission: { list: async () => ({ data: [] }) },
         question: { list: async () => ({ data: [] }) },
+        modelpick: { list: async () => ({ data: [] }) },
         v2: { reference: { list: async () => ({ data: { data: [] } }) } },
         mcp: {
           status: async () => {
@@ -164,6 +166,7 @@ describe("bootstrapDirectory", () => {
             throw new Error("legacy directory config should not be called")
           },
         },
+        modelpick: { list: async () => ({ data: [] }) },
       } as unknown as OpencodeClient,
       api,
       store,

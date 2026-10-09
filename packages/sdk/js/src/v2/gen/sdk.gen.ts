@@ -111,6 +111,13 @@ import type {
   McpRemoteConfig,
   McpStatusErrors,
   McpStatusResponses,
+  ModelpickListErrors,
+  ModelpickListResponses,
+  ModelpickRejectErrors,
+  ModelpickRejectResponses,
+  ModelpickReplyErrors,
+  ModelPickReplyPayload,
+  ModelpickReplyResponses,
   ModelRef,
   MoveSessionDestination,
   OutputFormat,
@@ -3076,6 +3083,109 @@ export class Question extends HeyApiClient {
     )
     return (options?.client ?? this.client).post<QuestionRejectResponses, QuestionRejectErrors, ThrowOnError>({
       url: "/question/{requestID}/reject",
+      ...options,
+      ...params,
+    })
+  }
+}
+
+export class Modelpick extends HeyApiClient {
+  /**
+   * List pending model pick requests
+   *
+   * Get all pending model pick requests across all sessions.
+   */
+  public list<ThrowOnError extends boolean = false>(
+    parameters?: {
+      directory?: string
+      workspace?: string
+    },
+    options?: Options<never, ThrowOnError>,
+  ) {
+    const params = buildClientParams(
+      [parameters],
+      [
+        {
+          args: [
+            { in: "query", key: "directory" },
+            { in: "query", key: "workspace" },
+          ],
+        },
+      ],
+    )
+    return (options?.client ?? this.client).get<ModelpickListResponses, ModelpickListErrors, ThrowOnError>({
+      url: "/modelpick",
+      ...options,
+      ...params,
+    })
+  }
+
+  /**
+   * Reply to model pick request
+   *
+   * Provide the selected model for a model pick request.
+   */
+  public reply<ThrowOnError extends boolean = false>(
+    parameters: {
+      requestID: string
+      directory?: string
+      workspace?: string
+      modelPickReplyPayload?: ModelPickReplyPayload
+    },
+    options?: Options<never, ThrowOnError>,
+  ) {
+    const params = buildClientParams(
+      [parameters],
+      [
+        {
+          args: [
+            { in: "path", key: "requestID" },
+            { in: "query", key: "directory" },
+            { in: "query", key: "workspace" },
+            { key: "modelPickReplyPayload", map: "body" },
+          ],
+        },
+      ],
+    )
+    return (options?.client ?? this.client).post<ModelpickReplyResponses, ModelpickReplyErrors, ThrowOnError>({
+      url: "/modelpick/{requestID}/reply",
+      ...options,
+      ...params,
+      headers: {
+        "Content-Type": "application/json",
+        ...options?.headers,
+        ...params.headers,
+      },
+    })
+  }
+
+  /**
+   * Reject model pick request
+   *
+   * Reject a model pick request from the AI assistant.
+   */
+  public reject<ThrowOnError extends boolean = false>(
+    parameters: {
+      requestID: string
+      directory?: string
+      workspace?: string
+    },
+    options?: Options<never, ThrowOnError>,
+  ) {
+    const params = buildClientParams(
+      [parameters],
+      [
+        {
+          args: [
+            { in: "path", key: "requestID" },
+            { in: "query", key: "directory" },
+            { in: "query", key: "workspace" },
+          ],
+        },
+      ],
+    )
+    return (options?.client ?? this.client).post<ModelpickRejectResponses, ModelpickRejectErrors, ThrowOnError>({
+      url: "/modelpick/{requestID}/reject",
       ...options,
       ...params,
     })
@@ -7180,6 +7290,11 @@ export class OpencodeClient extends HeyApiClient {
   private _question?: Question
   get question(): Question {
     return (this._question ??= new Question({ client: this.client }))
+  }
+
+  private _modelpick?: Modelpick
+  get modelpick(): Modelpick {
+    return (this._modelpick ??= new Modelpick({ client: this.client }))
   }
 
   private _permission?: Permission

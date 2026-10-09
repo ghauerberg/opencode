@@ -3,6 +3,7 @@ import { useLanguage } from "@/context/language"
 import { useSettings } from "@/context/settings"
 import { SessionPermissionDock } from "@/pages/session/composer/session-permission-dock"
 import { SessionQuestionDock } from "@/pages/session/composer/session-question-dock"
+import { SessionModelPickDock } from "@/pages/session/composer/session-modelpick-dock"
 import { SessionFollowupDock } from "@/pages/session/composer/session-followup-dock"
 import { SessionRevertDock } from "@/pages/session/composer/session-revert-dock"
 import { SessionTodoDock } from "@/pages/session/composer/session-todo-dock"
@@ -54,6 +55,19 @@ export function SessionComposerRegion(props: {
                   controller.onResponseSubmit()
                   controller.state.decide(response)
                 }}
+              />
+            </div>
+          )}
+        </Show>
+
+        <Show when={controller.state.modelPickRequest()} keyed>
+          {(request) => (
+            <div>
+              <SessionModelPickDock
+                request={request}
+                responding={controller.state.modelPickResponding()}
+                onPick={(model) => controller.state.replyModelPick(model)}
+                onDismiss={() => controller.state.rejectModelPick()}
               />
             </div>
           )}

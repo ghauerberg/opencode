@@ -1,0 +1,1001 @@
+import { afterEach, describe, expect } from "bun:test"
+import { SessionV1 } from "@opencode-ai/core/v1/session"
+import { Database } from "@opencode-ai/core/database/database"
+import { LayerNode } from "@opencode-ai/core/effect/layer-node"
+import { Global } from "@opencode-ai/core/global"
+import { SessionProjector } from "@opencode-ai/core/session/projector"
+import { Effect, Layer, Queue, Fiber, Exit } from "effect"
+import { Agent } from "../../src/agent/agent"
+import { BackgroundJob } from "@/background/job"
+import { EventV2Bridge } from "@/event-v2-bridge"
+import { Config } from "@/config/config"
+import { CrossSpawnSpawner } from "@opencode-ai/core/cross-spawn-spawner"
+import { Ripgrep } from "@opencode-ai/core/ripgrep"
+import { Session } from "@/session/session"
+import { MessageID, PartID, SessionID } from "../../src/session/schema"
+import { SessionRunState } from "@/session/run-state"
+import { SessionStatus } from "@/session/status"
+import { Advisor } from "@/advisor"
+import { AdvisorTool } from "../../src/tool/advisor"
+import type { TaskPromptOps } from "../../src/tool/task"
+import { Truncate } from "@/tool/truncate"
+import { ToolRegistry } from "@/tool/registry"
+import { Permission } from "@/permission"
+import { RuntimeFlags } from "@/effect/runtime-flags"
+import { Command } from "@/command"
+import { disposeAllInstances } from "../fixture/fixture"
+import { ModelPick } from "@/modelpick"
+import { ModelPickStore } from "@/modelpick/store"
+import { testEffect } from "../lib/effect"
+import { ProviderV2 } from "@opencode-ai/core/provider"
+import { ModelV2 } from "@opencode-ai/core/model"
+import { Wildcard } from "@opencode-ai/core/util/wildcard"
+
+const ref = {
+  providerID: ProviderV2.ID.make("test"),
+  modelID: ModelV2.ID.make("test-model"),
+}
+
+const advisorLayer = (overrides?: Record<string, unknown>) =>
+  LayerNode.compile(
+    LayerNode.group([
+      Agent.node,
+      BackgroundJob.node,
+      EventV2Bridge.node,
+      Config.node,
+      CrossSpawnSpawner.node,
+      Session.node,
+      SessionProjector.node,
+      SessionRunState.node,
+      SessionStatus.node,
+      Truncate.node,
+      ToolRegistry.node,
+      Database.node,
+      RuntimeFlags.node,
+      Ripgrep.node,
+      Global.node,
+      Command.node,
+      Advisor.node,
+      ModelPick.node,
+    ]),
+    [[Global.node, Global.layerWith({ config: "/tmp/advisor-test-config" })]],
+  )
+
+const it = testEffect(advisorLayer())
+
+const seed = Effect.fn("AdvisorTest.seed")(function* () {
+  const session = yield* Session.Service
+  const chat = yield* session.create({ title: "Advisor test" })
+  const user = yield* session.updateMessage({
+    id: MessageID.ascending(),
+    role: "user",
+    sessionID: chat.id,
+    agent: "build",
+    model: ref,
+    time: { created: Date.now() },
+  })
+  const assistant: SessionV1.Assistant = {
+    id: MessageID.ascending(),
+    role: "assistant",
+    parentID: user.id,
+    sessionID: chat.id,
+    mode: "build",
+    agent: "build",
+    cost: 0,
+    path: { cwd: "/tmp", root: "/tmp" },
+    tokens: { input: 0, output: 0, reasoning: 0, cache: { read: 0, write: 0 } },
+    modelID: ref.modelID,
+    providerID: ref.providerID,
+    time: { created: Date.now() },
+    finish: "stop",
+  }
+  yield* session.updateMessage(assistant)
+  return { chat, assistant }
+})
+
+function assistantMessage(input: {
+  sessionID: SessionID
+  parentID: MessageID
+  created?: number
+  summary?: boolean
+}): SessionV1.Assistant {
+  return {
+    id: MessageID.ascending(),
+    role: "assistant",
+    parentID: input.parentID,
+    sessionID: input.sessionID,
+    mode: "build",
+    agent: "build",
+    cost: 0,
+    path: { cwd: "/tmp", root: "/tmp" },
+    tokens: { input: 0, output: 0, reasoning: 0, cache: { read: 0, write: 0 } },
+    modelID: ref.modelID,
+    providerID: ref.providerID,
+    time: { created: input.created ?? Date.now() },
+    finish: "stop",
+    ...(input.summary ? { summary: true } : {}),
+  }
+}
+
+// Seeds a compacted session the way the primary loop does: an early turn that
+// compaction hides, a retained tail, the compaction marker + summary, then fresh
+// post-compaction work.
+const seedCompaction = Effect.fn("AdvisorTest.seedCompaction")(function* (sessionID: SessionID) {
+  const sessions = yield* Session.Service
+
+  const earlyUser = yield* sessions.updateMessage({
+    id: MessageID.ascending(),
+    role: "user",
+    sessionID,
+    agent: "build",
+    model: ref,
+    time: { created: Date.now() },
+  })
+  yield* sessions.updatePart({
+    id: PartID.ascending(),
+    messageID: earlyUser.id,
+    sessionID,
+    type: "text",
+    text: "PRE-COMPACTION DETAIL",
+  })
+  yield* sessions.updateMessage(assistantMessage({ sessionID, parentID: earlyUser.id }))
+
+  const tailUser = yield* sessions.updateMessage({
+    id: MessageID.ascending(),
+    role: "user",
+    sessionID,
+    agent: "build",
+    model: ref,
+    time: { created: Date.now() },
+  })
+  yield* sessions.updatePart({
+    id: PartID.ascending(),
+    messageID: tailUser.id,
+    sessionID,
+    type: "text",
+    text: "Retained tail prompt",
+  })
+
+  const compactionUser = yield* sessions.updateMessage({
+    id: MessageID.ascending(),
+    role: "user",
+    sessionID,
+    agent: "build",
+    model: ref,
+    time: { created: Date.now() },
+  })
+  yield* sessions.updatePart({
+    id: PartID.ascending(),
+    messageID: compactionUser.id,
+    sessionID,
+    type: "compaction",
+    auto: true,
+    tail_start_id: tailUser.id,
+  })
+  yield* sessions.updateMessage(
+    assistantMessage({ sessionID, parentID: compactionUser.id, summary: true }),
+  )
+
+  const postUser = yield* sessions.updateMessage({
+    id: MessageID.ascending(),
+    role: "user",
+    sessionID,
+    agent: "build",
+    model: ref,
+    time: { created: Date.now() },
+  })
+  yield* sessions.updatePart({
+    id: PartID.ascending(),
+    messageID: postUser.id,
+    sessionID,
+    type: "text",
+    text: "Post-compaction work",
+  })
+  yield* sessions.updateMessage(assistantMessage({ sessionID, parentID: postUser.id }))
+})
+
+function reply(input: Parameters<TaskPromptOps["prompt"]>[0], text: string): SessionV1.WithParts {
+  const id = MessageID.ascending()
+  return {
+    info: {
+      id,
+      role: "assistant",
+      parentID: input.messageID ?? MessageID.ascending(),
+      sessionID: input.sessionID,
+      mode: input.agent ?? "advisor",
+      agent: input.agent ?? "advisor",
+      cost: 0,
+      path: { cwd: "/tmp", root: "/tmp" },
+      tokens: { input: 0, output: 0, reasoning: 0, cache: { read: 0, write: 0 } },
+      modelID: input.model?.modelID ?? ref.modelID,
+      providerID: input.model?.providerID ?? ref.providerID,
+      time: { created: Date.now() },
+      finish: "stop",
+    },
+    parts: [
+      {
+        id: PartID.ascending(),
+        messageID: id,
+        sessionID: input.sessionID,
+        type: "text",
+        text,
+      },
+    ],
+  }
+}
+
+function stubOps(text: string): TaskPromptOps {
+  return {
+    cancel: () => Effect.void,
+    resolvePromptParts: (template) => Effect.succeed([{ type: "text" as const, text: template }]),
+    prompt: (input) => Effect.sync(() => reply(input, text)),
+  }
+}
+
+function stubOpsWithCapture(
+  text: string,
+  onPrompt: (input: Parameters<TaskPromptOps["prompt"]>[0]) => void,
+): TaskPromptOps {
+  return {
+    cancel: () => Effect.void,
+    resolvePromptParts: (template) => Effect.succeed([{ type: "text" as const, text: template }]),
+    prompt: (input) => {
+      onPrompt(input)
+      return Effect.sync(() => reply(input, text))
+    },
+  }
+}
+
+const pendingModelPick = Effect.fnUntraced(function* (modelpick: ModelPick.Interface) {
+  const events = yield* EventV2Bridge.Service
+  const asked = yield* Queue.unbounded<void>()
+  const off = yield* events.listen((event) => {
+    if (event.type === ModelPick.Event.Asked.type) Queue.offerUnsafe(asked, undefined)
+    return Effect.void
+  })
+  yield* Effect.addFinalizer(() => off)
+
+  for (;;) {
+    const items = yield* modelpick.list()
+    const item = items[0]
+    if (item) return item
+    yield* Queue.take(asked).pipe(Effect.timeout("2 seconds"))
+  }
+})
+
+const advisorText = [
+  "The current approach needs adjustment: the evidence does not support further changes here.",
+  "The same failure has persisted across attempts.",
+  "Inspect the API boundary before making more middleware changes, and avoid further TokenValidator changes until then.",
+].join("\n\n")
+
+const advisorConfig = {
+  config: {
+    advisor: {
+      automatic: { every: 3 },
+      stepTools: ["read", "write", "edit", "bash", "grep", "glob"],
+    },
+  },
+}
+
+const fullHistoryConfig = {
+  config: {
+    advisor: {
+      automatic: { every: 3 },
+      stepTools: ["read", "write", "edit", "bash", "grep", "glob"],
+      history: "full" as const,
+    },
+  },
+}
+
+afterEach(async () => {
+  await disposeAllInstances()
+  // The persisted advisor model lives under the shared test config dir; clear it
+  // so tests start from a clean state.
+  await Bun.write("/tmp/advisor-test-config/consult-models.json", "{}").catch(() => {})
+})
+
+describe("advisor", () => {
+  it.instance(
+    "model invocation runs the advisor and returns plain-text advice",
+    () =>
+      Effect.gen(function* () {
+        const { chat, assistant } = yield* seed()
+        const tool = yield* AdvisorTool
+        const def = yield* tool.init()
+        const sessions = yield* Session.Service
+
+        const result = yield* def.execute(
+          {},
+          {
+            sessionID: chat.id,
+            messageID: assistant.id,
+            agent: "build",
+            abort: new AbortController().signal,
+            extra: { promptOps: stubOps(advisorText) },
+            messages: [],
+            metadata: () => Effect.void,
+            ask: () => Effect.void,
+          },
+        )
+
+        expect(result.output).toContain("current approach needs adjustment")
+        expect(result.output).toContain("Inspect the API boundary")
+
+        // The temporary subagent is archived separately from the parent conversation
+        // and keeps its own clean conversation (no copied parent messages).
+        const children = yield* sessions.children(chat.id)
+        expect(children).toHaveLength(1)
+        expect(yield* sessions.messages({ sessionID: children[0].id })).toHaveLength(0)
+        expect(children[0]?.time.archived).toBeNumber()
+        // The tool part links to the temporary advisor session, not the parent.
+        expect(result.metadata.sessionId).toBe(children[0].id)
+      }),
+    advisorConfig,
+  )
+
+  it.instance("archives the temporary child when the advisor model call fails", () =>
+    Effect.gen(function* () {
+      const advisor = yield* Advisor.Service
+      const sessions = yield* Session.Service
+      const { chat } = yield* seed()
+
+      const exit = yield* advisor
+        .runAdvisorReview({
+          sessionID: chat.id,
+          trigger: "user",
+        promptOps: {
+          cancel: () => Effect.void,
+          resolvePromptParts: (template) => Effect.succeed([{ type: "text" as const, text: template }]),
+          prompt: (input) =>
+            Effect.sync(() => {
+              const base = reply(input, "")
+              return {
+                ...base,
+                info: {
+                  ...base.info,
+                  error: new SessionV1.APIError({ message: "model call failed", isRetryable: false }).toObject(),
+                },
+              }
+            }),
+        },
+        })
+        .pipe(Effect.exit)
+      expect(Exit.isFailure(exit)).toBe(true)
+      const children = yield* sessions.children(chat.id)
+      expect(children).toHaveLength(1)
+      expect(children[0]?.time.archived).toBeNumber()
+    }),
+    advisorConfig,
+  )
+
+  it.instance("failed automatic review resets the step counter", () =>
+    Effect.gen(function* () {
+      const advisor = yield* Advisor.Service
+      const { chat } = yield* seed()
+      for (let index = 0; index < 3; index++)
+        yield* advisor.step({ sessionID: chat.id, tool: "read", agent: "build" })
+
+      const triggered = yield* advisor.maybeAutoReview({
+        sessionID: chat.id,
+        agent: "build",
+        model: ref,
+        promptOps: stubOps(advisorText),
+      })
+      // The review fails (no such agent) and the session keeps working...
+      expect(triggered).toBe("none")
+      // ...and the counter restarts instead of retrying on every next step.
+      expect(yield* advisor.getState(chat.id)).toMatchObject({ steps: 0, advisorRunning: false })
+      yield* advisor.step({ sessionID: chat.id, tool: "read", agent: "build" })
+      expect(yield* advisor.getState(chat.id)).toMatchObject({ steps: 1, advisorRunning: false })
+    }),
+    {
+      config: {
+        advisor: {
+          agent: "missing-advisor",
+          automatic: { every: 3 },
+        },
+      },
+    },
+  )
+
+  it.instance("counter is per-session and steps count only configured tools", () =>
+    Effect.gen(function* () {
+      const advisor = yield* Advisor.Service
+      const { chat } = yield* seed()
+      const other = yield* (yield* Session.Service).create({ title: "Other" })
+
+      yield* advisor.step({ sessionID: chat.id, tool: "read", agent: "build" })
+      yield* advisor.step({ sessionID: chat.id, tool: "read", agent: "build" })
+      yield* advisor.step({ sessionID: other.id, tool: "read", agent: "build" })
+      yield* advisor.step({ sessionID: chat.id, tool: "question", agent: "build" })
+
+      const a = yield* advisor.getState(chat.id)
+      const b = yield* advisor.getState(other.id)
+      expect(a.steps).toBe(2)
+      expect(b.steps).toBe(1)
+      expect(a.cycle).toBe(0)
+    }),
+  )
+
+  it.instance(
+    "auto trigger fires at the allowance and injects advice into the same session",
+    () =>
+      Effect.gen(function* () {
+        const advisor = yield* Advisor.Service
+        const sessions = yield* Session.Service
+        const { chat } = yield* seed()
+
+        yield* advisor.step({ sessionID: chat.id, tool: "read", agent: "build" })
+        yield* advisor.step({ sessionID: chat.id, tool: "read", agent: "build" })
+        yield* advisor.step({ sessionID: chat.id, tool: "read", agent: "build" })
+
+        const triggered = yield* advisor.maybeAutoReview({
+          sessionID: chat.id,
+          agent: "build",
+          model: ref,
+          promptOps: stubOps(advisorText),
+        })
+        expect(triggered).toBe("reviewed")
+
+        const after = yield* advisor.getState(chat.id)
+        expect(after.cycle).toBe(1)
+        expect(after.steps).toBe(0)
+        expect(after.history).toHaveLength(1)
+
+        // The advice landed as a visible user message in the same session.
+        const msgs = yield* sessions.messages({ sessionID: chat.id }).pipe(Effect.orDie)
+        const advicePart = msgs.find((msg) =>
+          msg.parts.some((part) => part.type === "text" && part.text.includes("current approach needs adjustment")),
+        )?.parts.find((part) => part.type === "text")
+        expect(advicePart).toBeDefined()
+        expect(advicePart?.type === "text" ? advicePart.synthetic : undefined).toBeUndefined()
+      }),
+    advisorConfig,
+  )
+
+  it.instance(
+    "does not re-trigger while a review is running or for advisor activity",
+    () =>
+      Effect.gen(function* () {
+        const advisor = yield* Advisor.Service
+        const { chat } = yield* seed()
+
+        // Advisor-generated activity (agent name matches the advisor agent) is not counted.
+        yield* advisor.step({ sessionID: chat.id, tool: "read", agent: "advisor" })
+        const s = yield* advisor.getState(chat.id)
+        expect(s.steps).toBe(0)
+
+        // Simulate an in-flight review: below allowance, no trigger happens.
+        const notYet = yield* advisor.maybeAutoReview({
+          sessionID: chat.id,
+          agent: "build",
+          model: ref,
+          promptOps: stubOps(advisorText),
+        })
+        expect(notYet).toBe("none")
+      }),
+    advisorConfig,
+  )
+
+  it.instance(
+    "fails open when the advisor agent is missing",
+    () =>
+      Effect.gen(function* () {
+        const advisor = yield* Advisor.Service
+        const { chat } = yield* seed()
+        yield* advisor.step({ sessionID: chat.id, tool: "read", agent: "build" })
+        yield* advisor.step({ sessionID: chat.id, tool: "read", agent: "build" })
+        yield* advisor.step({ sessionID: chat.id, tool: "read", agent: "build" })
+
+        const triggered = yield* advisor.maybeAutoReview({
+          sessionID: chat.id,
+          agent: "build",
+          model: ref,
+          promptOps: stubOps(advisorText),
+        })
+        // The built-in advisor agent exists, so this triggers; history is recorded.
+        expect(triggered).toBe("reviewed")
+        const after = yield* advisor.getState(chat.id)
+        expect(after.history).toHaveLength(1)
+      }),
+    advisorConfig,
+  )
+
+  it.instance("advisor agent is read-only", () =>
+    Effect.gen(function* () {
+      const agents = yield* Agent.Service
+      const advisor = yield* agents.get("advisor")
+      expect(advisor).toBeDefined()
+      expect(advisor?.mode).toBe("subagent")
+      expect(advisor?.steps).toBe(3)
+      const rules = advisor!.permission
+      const ev = (permission: string) => {
+        const rule = rules.findLast((r) => Wildcard.match(permission, r.permission) && Wildcard.match("*", r.pattern))
+        return rule?.action
+      }
+      expect(ev("read")).toBe("allow")
+      expect(ev("edit")).toBe("deny")
+      expect(ev("bash")).toBe("deny")
+      expect(ev("task")).toBe("deny")
+      expect(ev("todowrite")).toBe("deny")
+    }),
+  )
+
+  it.instance("clean subagent prompt carries the session's visible history", () =>
+    Effect.gen(function* () {
+      const advisor = yield* Advisor.Service
+      const sessions = yield* Session.Service
+      const { chat } = yield* seed()
+      const history = yield* sessions.messages({ sessionID: chat.id })
+      const first = history.find((message) => message.info.role === "user")
+      expect(first).toBeDefined()
+      if (!first || first.info.role !== "user") return
+      yield* sessions.updatePart({
+        id: PartID.ascending(),
+        sessionID: chat.id,
+        messageID: first.info.id,
+        type: "text",
+        text: "Important early constraint: component X must remain backwards compatible.",
+      })
+      yield* Effect.forEach(
+        Array.from({ length: 40 }, (_, index) => index),
+        (index) =>
+          Effect.gen(function* () {
+            const user = yield* sessions.updateMessage({
+              id: MessageID.ascending(),
+              role: "user",
+              sessionID: chat.id,
+              agent: "build",
+              model: ref,
+              time: { created: Date.now() + index * 2 + 1 },
+            })
+            yield* sessions.updatePart({
+              id: PartID.ascending(),
+              messageID: user.id,
+              sessionID: chat.id,
+              type: "text",
+              text: `Unrelated investigation ${index}: ${"background detail ".repeat(50)}`,
+            })
+            const assistant: SessionV1.Assistant = {
+              id: MessageID.ascending(),
+              parentID: user.id,
+              role: "assistant",
+              sessionID: chat.id,
+              mode: "build",
+              agent: "build",
+              cost: 0,
+              path: { cwd: "/tmp", root: "/tmp" },
+              tokens: { input: 0, output: 0, reasoning: 0, cache: { read: 0, write: 0 } },
+              modelID: ref.modelID,
+              providerID: ref.providerID,
+              time: { created: Date.now() + index * 2 + 2 },
+              finish: "stop",
+            }
+            yield* sessions.updateMessage(assistant)
+            yield* sessions.updatePart({
+              id: PartID.ascending(),
+              messageID: assistant.id,
+              sessionID: chat.id,
+              type: "text",
+              text: "Continued unrelated investigation.",
+            })
+          }),
+      )
+      const before = yield* sessions.messages({ sessionID: chat.id })
+      const agentService = yield* Agent.Service
+      const advisorAgent = yield* agentService.get("advisor")
+      let sawConstraint = false
+      let sawLaterHistory = false
+      let sawReason = false
+      let sawReadOnlyPermissions = false
+      const review = yield* advisor.runAdvisorReview({
+        sessionID: chat.id,
+        trigger: "user",
+        reason: "Should component X be changed?",
+        promptOps: {
+          cancel: () => Effect.void,
+          resolvePromptParts: (template) => Effect.succeed([{ type: "text" as const, text: template }]),
+          prompt: (input) =>
+            Effect.gen(function* () {
+              const child = yield* sessions.get(input.sessionID)
+              const promptText = input.parts.map((part) => (part.type === "text" ? part.text : "")).join("\n")
+              sawConstraint = promptText.includes("component X must remain backwards compatible")
+              sawLaterHistory = promptText.includes("Unrelated investigation 39")
+              sawReason = promptText.includes("Should component X be changed?")
+              const action = (permission: string) =>
+                Permission.evaluate(permission, "*", advisorAgent?.permission ?? [], child.permission ?? []).action
+              sawReadOnlyPermissions =
+                action("read") === "allow" && ["edit", "write", "bash", "task"].every((tool) => action(tool) === "deny")
+              // The subagent keeps its own clean conversation: no parent messages copied.
+              expect(yield* sessions.messages({ sessionID: input.sessionID })).toHaveLength(0)
+              return reply(input, advisorText)
+            }).pipe(Effect.orDie),
+        },
+      })
+      expect(review.response).toContain("current approach needs adjustment")
+      expect(sawConstraint).toBe(true)
+      expect(sawLaterHistory).toBe(true)
+      expect(sawReason).toBe(true)
+      expect(sawReadOnlyPermissions).toBe(true)
+      expect(yield* sessions.messages({ sessionID: chat.id })).toHaveLength(before.length)
+      const children = yield* sessions.children(chat.id)
+      expect(children).toHaveLength(1)
+      expect(children[0]?.agent).toBe("advisor")
+      expect(children[0]?.metadata?.advisorTemporary).toBe(true)
+      expect(children[0]?.time.archived).toBeNumber()
+    }),
+  )
+
+  it.instance("session id type is respected", () =>
+    Effect.gen(function* () {
+      expect(SessionID.make("ses_advisor_test")).toMatch(/^ses_/)
+    }),
+  )
+
+  it.instance(
+    "history 'compacted' (default) hides pre-compaction work from the advisor",
+    () =>
+      Effect.gen(function* () {
+        const advisor = yield* Advisor.Service
+        const { chat } = yield* seed()
+        yield* seedCompaction(chat.id)
+
+        let transcript = ""
+        yield* advisor.runAdvisorReview({
+          sessionID: chat.id,
+          trigger: "user",
+          promptOps: stubOpsWithCapture("advice", (input) => {
+            transcript = input.parts.map((part) => (part.type === "text" ? part.text : "")).join("\n")
+          }),
+        })
+
+        expect(transcript).toContain("Post-compaction work")
+        expect(transcript).not.toContain("PRE-COMPACTION DETAIL")
+      }),
+    advisorConfig,
+  )
+
+  it.instance(
+    "history 'full' sends the entire transcript, including pre-compaction work",
+    () =>
+      Effect.gen(function* () {
+        const advisor = yield* Advisor.Service
+        const { chat } = yield* seed()
+        yield* seedCompaction(chat.id)
+
+        let transcript = ""
+        yield* advisor.runAdvisorReview({
+          sessionID: chat.id,
+          trigger: "user",
+          promptOps: stubOpsWithCapture("advice", (input) => {
+            transcript = input.parts.map((part) => (part.type === "text" ? part.text : "")).join("\n")
+          }),
+        })
+
+        expect(transcript).toContain("PRE-COMPACTION DETAIL")
+        expect(transcript).toContain("Post-compaction work")
+      }),
+    fullHistoryConfig,
+  )
+
+  it.instance(
+    "advisor_review tool is registered",
+    () =>
+      Effect.gen(function* () {
+        const registry = yield* ToolRegistry.Service
+        const agents = yield* Agent.Service
+        const build = yield* agents.get("build")
+        const tools = yield* registry.tools({ ...ref, agent: build })
+        const advisorTool = tools.find((tool) => tool.id === AdvisorTool.id)
+        expect(advisorTool).toBeDefined()
+        expect(advisorTool?.description).toContain("senior reasoning advisor")
+      }),
+    advisorConfig,
+  )
+
+  it.instance(
+    "counter resets after a successful review (cycle advances)",
+    () =>
+      Effect.gen(function* () {
+        const advisor = yield* Advisor.Service
+        const { chat } = yield* seed()
+        for (let i = 0; i < 3; i++) yield* advisor.step({ sessionID: chat.id, tool: "read", agent: "build" })
+
+        const triggered = yield* advisor.maybeAutoReview({
+          sessionID: chat.id,
+          agent: "build",
+          model: ref,
+          promptOps: stubOps(advisorText),
+        })
+        expect(triggered).toBe("reviewed")
+
+        const after = yield* advisor.getState(chat.id)
+        expect(after.cycle).toBe(1)
+        expect(after.steps).toBe(0)
+
+        // A second round triggers again, proving the reset allowed re-entry.
+        for (let i = 0; i < 3; i++) yield* advisor.step({ sessionID: chat.id, tool: "edit", agent: "build" })
+        const again = yield* advisor.maybeAutoReview({
+          sessionID: chat.id,
+          agent: "build",
+          model: ref,
+          promptOps: stubOps(advisorText),
+        })
+        expect(again).toBe("reviewed")
+        const final = yield* advisor.getState(chat.id)
+        expect(final.cycle).toBe(2)
+        expect(final.history).toHaveLength(2)
+      }),
+    advisorConfig,
+  )
+
+  it.instance(
+    "/advice is the single user-facing Advisor entry point",
+    () =>
+      Effect.gen(function* () {
+        const commands = yield* Command.Service
+        const adviceCmd = yield* commands.get(Command.Default.ADVICE)
+        expect(adviceCmd?.name).toBe("advice")
+        expect(adviceCmd?.subtask).toBeUndefined()
+        expect(yield* commands.get("advisor")).toBeUndefined()
+        expect(yield* commands.get("advise")).toBeUndefined()
+      }),
+    advisorConfig,
+  )
+
+  it.instance(
+    "/advisormodel persists and clears the advisor model",
+    () =>
+      Effect.gen(function* () {
+        const commands = yield* Command.Service
+        const cmd = yield* commands.get(Command.Default.ADVISOR_MODEL)
+        expect(cmd).toBeDefined()
+
+        const advisor = yield* Advisor.Service
+        const { chat } = yield* seed()
+
+        // Nothing set yet.
+        expect(yield* advisor.getConfiguredModel(chat.id)).toBeUndefined()
+
+        yield* advisor.setConfiguredModel({
+          sessionID: chat.id,
+          model: { providerID: "custom-provider", modelID: "custom-model" },
+        })
+        const configured = yield* advisor.getConfiguredModel(chat.id)
+        expect(configured).toEqual({
+          providerID: ProviderV2.ID.make("custom-provider"),
+          modelID: ModelV2.ID.make("custom-model"),
+        })
+
+        // Clearing falls back to the agent's configured model (undefined here).
+        yield* advisor.setConfiguredModel({ sessionID: chat.id, model: undefined })
+        expect(yield* advisor.getConfiguredModel(chat.id)).toBeUndefined()
+      }),
+    advisorConfig,
+  )
+
+  it.instance(
+    "advisor review uses the persisted model override",
+    () =>
+      Effect.gen(function* () {
+        const advisor = yield* Advisor.Service
+        const { chat } = yield* seed()
+
+        yield* advisor.setConfiguredModel({
+          sessionID: chat.id,
+          model: { providerID: "advisor-provider", modelID: "advisor-model" },
+        })
+        yield* advisor.step({ sessionID: chat.id, tool: "read", agent: "build" })
+        yield* advisor.step({ sessionID: chat.id, tool: "read", agent: "build" })
+        yield* advisor.step({ sessionID: chat.id, tool: "read", agent: "build" })
+
+        let promptModel: { providerID: string; modelID: string } | undefined
+        const triggered = yield* advisor.maybeAutoReview({
+          sessionID: chat.id,
+          agent: "build",
+          model: ref,
+          promptOps: stubOpsWithCapture(advisorText, (input) => (promptModel = input.model)),
+        })
+        expect(triggered).toBe("reviewed")
+        expect(promptModel).toEqual({ providerID: "advisor-provider", modelID: "advisor-model" })
+      }),
+    advisorConfig,
+  )
+
+  it.instance(
+    "askConfiguredModel opens the picker, saves the choice, and persists it",
+    () =>
+      Effect.gen(function* () {
+        const advisor = yield* Advisor.Service
+        const modelpick = yield* ModelPick.Service
+        const { chat } = yield* seed()
+
+        const fiber = yield* advisor.askConfiguredModel({ sessionID: chat.id }).pipe(Effect.forkScoped)
+
+        const item = yield* pendingModelPick(modelpick)
+        yield* modelpick.reply({
+          requestID: item.id,
+          answer: { providerID: "picker-prov", modelID: "picker-model" },
+        })
+
+        const picked = yield* Fiber.join(fiber)
+        expect(picked).toEqual({ providerID: "picker-prov", modelID: "picker-model" })
+
+        // Persisted under the advisor role name and reused by getConfiguredModel.
+        const saved = yield* ModelPickStore.find("/tmp/advisor-test-config", "advisor")
+        expect(saved).toEqual({ providerID: "picker-prov", modelID: "picker-model" })
+        const configured = yield* advisor.getConfiguredModel(chat.id)
+        expect(configured).toEqual({
+          providerID: ProviderV2.ID.make("picker-prov"),
+          modelID: ModelV2.ID.make("picker-model"),
+        })
+        expect(yield* modelpick.list()).toHaveLength(0)
+      }),
+    advisorConfig,
+  )
+
+  it.instance(
+    "askConfiguredModel returns undefined when the picker is dismissed",
+    () =>
+      Effect.gen(function* () {
+        const advisor = yield* Advisor.Service
+        const modelpick = yield* ModelPick.Service
+        const { chat } = yield* seed()
+
+        const fiber = yield* advisor.askConfiguredModel({ sessionID: chat.id }).pipe(Effect.forkScoped)
+
+        const item = yield* pendingModelPick(modelpick)
+        yield* modelpick.reject(item.id)
+
+        expect(yield* Fiber.join(fiber)).toBeUndefined()
+        expect(yield* modelpick.list()).toHaveLength(0)
+      }),
+    advisorConfig,
+  )
+
+  it.instance(
+    "automatic reviews can be disabled via advisor.automatic.enabled",
+    () =>
+      Effect.gen(function* () {
+        const advisor = yield* Advisor.Service
+        const { chat } = yield* seed()
+        for (let index = 0; index < 3; index++)
+          yield* advisor.step({ sessionID: chat.id, tool: "read", agent: "build" })
+
+        const outcome = yield* advisor.maybeAutoReview({
+          sessionID: chat.id,
+          agent: "build",
+          model: ref,
+          promptOps: stubOps(advisorText),
+        })
+        expect(outcome).toBe("none")
+        // The steps still accumulate; only the automatic trigger is disabled.
+        expect((yield* advisor.getState(chat.id)).steps).toBe(3)
+      }),
+    {
+      config: {
+        advisor: {
+          automatic: { enabled: false, every: 3 },
+        },
+      },
+    },
+  )
+
+  it.instance(
+    "failMode 'pause' halts instead of continuing when an automatic review fails",
+    () =>
+      Effect.gen(function* () {
+        const advisor = yield* Advisor.Service
+        const { chat } = yield* seed()
+        for (let index = 0; index < 3; index++)
+          yield* advisor.step({ sessionID: chat.id, tool: "read", agent: "build" })
+
+        // The review fails because the configured advisor agent does not exist.
+        const outcome = yield* advisor.maybeAutoReview({
+          sessionID: chat.id,
+          agent: "build",
+          model: ref,
+          promptOps: stubOps(advisorText),
+        })
+        expect(outcome).toBe("halt")
+        // The counter still resets so a later resume does not immediately retry.
+        expect(yield* advisor.getState(chat.id)).toMatchObject({ steps: 0, advisorRunning: false })
+      }),
+    {
+      config: {
+        advisor: {
+          agent: "missing-advisor",
+          failMode: "pause",
+          automatic: { every: 3 },
+        },
+      },
+    },
+  )
+
+  it.instance(
+    "persists the review cycle into session metadata without the transient running flag",
+    () =>
+      Effect.gen(function* () {
+        const advisor = yield* Advisor.Service
+        const sessions = yield* Session.Service
+        const { chat } = yield* seed()
+        for (let index = 0; index < 3; index++)
+          yield* advisor.step({ sessionID: chat.id, tool: "read", agent: "build" })
+
+        yield* advisor.maybeAutoReview({
+          sessionID: chat.id,
+          agent: "build",
+          model: ref,
+          promptOps: stubOps(advisorText),
+        })
+
+        const info = yield* sessions.get(chat.id).pipe(Effect.orDie)
+        const persisted = info.metadata?.advisorState as
+          | { cycle: number; steps: number; history: unknown[]; advisorRunning?: unknown }
+          | undefined
+        expect(persisted).toBeDefined()
+        expect(persisted?.cycle).toBe(1)
+        expect(persisted?.steps).toBe(0)
+        expect(persisted?.history).toHaveLength(1)
+        // `advisorRunning` is transient and must never be persisted.
+        expect(persisted?.advisorRunning).toBeUndefined()
+      }),
+    advisorConfig,
+  )
+
+  it.instance(
+    "restores the review cycle from session metadata after a restart",
+    () =>
+      Effect.gen(function* () {
+        const advisor = yield* Advisor.Service
+        const sessions = yield* Session.Service
+        const { chat } = yield* seed()
+
+        // Simulate a process restart: no in-memory state for this session, but
+        // durable state already stored in metadata.
+        yield* sessions.setMetadata({
+          sessionID: chat.id,
+          metadata: {
+            advisorState: {
+              steps: 2,
+              cycle: 4,
+              history: [
+                {
+                  sessionID: chat.id,
+                  trigger: "automatic",
+                  cycle: 4,
+                  response: "Restored advice",
+                  createdAt: 1,
+                },
+              ],
+            },
+          },
+        })
+
+        const restored = yield* advisor.getState(chat.id)
+        expect(restored.cycle).toBe(4)
+        expect(restored.steps).toBe(2)
+        expect(restored.history).toHaveLength(1)
+        expect(restored.advisorRunning).toBe(false)
+      }),
+    advisorConfig,
+  )
+
+  it.instance(
+    "ignores malformed persisted advisor state instead of failing",
+    () =>
+      Effect.gen(function* () {
+        const advisor = yield* Advisor.Service
+        const sessions = yield* Session.Service
+        const { chat } = yield* seed()
+        yield* sessions.setMetadata({ sessionID: chat.id, metadata: { advisorState: { cycle: "nope" } } })
+
+        const state = yield* advisor.getState(chat.id)
+        expect(state.cycle).toBe(0)
+        expect(state.steps).toBe(0)
+        expect(state.history).toHaveLength(0)
+      }),
+    advisorConfig,
+  )
+})

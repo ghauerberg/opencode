@@ -1,5 +1,13 @@
 import { describe, expect, test } from "bun:test"
-import type { Message, Part, PermissionRequest, Project, QuestionRequest, Session } from "@opencode-ai/sdk/v2/client"
+import type {
+  Message,
+  ModelPickRequest,
+  Part,
+  PermissionRequest,
+  Project,
+  QuestionRequest,
+  Session,
+} from "@opencode-ai/sdk/v2/client"
 import { createStore } from "solid-js/store"
 import type { State } from "./types"
 import { applyDirectoryEvent, applyGlobalEvent, cleanupDroppedSessionCaches } from "./event-reducer"
@@ -57,6 +65,13 @@ const questionRequest = (id: string, sessionID: string, title = id) =>
     ],
   }) as QuestionRequest
 
+const modelpickRequest = (id: string, sessionID: string, role = "advisor") =>
+  ({
+    id,
+    sessionID,
+    role,
+  }) as ModelPickRequest
+
 const baseState = (input: Partial<State> = {}) =>
   ({
     status: "complete",
@@ -75,6 +90,7 @@ const baseState = (input: Partial<State> = {}) =>
     todo: {},
     permission: {},
     question: {},
+    modelpick: {},
     mcp: {},
     lsp: [],
     vcs: undefined,
@@ -553,6 +569,45 @@ describe("applyDirectoryEvent", () => {
       loadLsp() {},
     })
     expect(store.question[sessionID]?.map((x) => x.id)).toEqual(["q_1", "q_3"])
+  })
+
+  test("tracks model pick request lifecycles", () => {
+    const sessionID = "ses_1"
+    const [store, setStore] = createStore(
+      baseState({
+        modelpick: { [sessionID]: [modelpickRequest("mpk_1", sessionID), modelpickRequest("mpk_3", sessionID)] },
+      }),
+    )
+
+    applyDirectoryEvent({
+      event: { type: "modelpick.asked", properties: modelpickRequest("mpk_2", sessionID) },
+      store,
+      setStore,
+      push() {},
+      directory: "/tmp",
+      loadLsp() {},
+    })
+    expect(store.modelpick[sessionID]?.map((x) => x.id)).toEqual(["mpk_1", "mpk_2", "mpk_3"])
+
+    applyDirectoryEvent({
+      event: { type: "modelpick.asked", properties: modelpickRequest("mpk_2", sessionID, "architect") },
+      store,
+      setStore,
+      push() {},
+      directory: "/tmp",
+      loadLsp() {},
+    })
+    expect(store.modelpick[sessionID]?.find((x) => x.id === "mpk_2")?.role).toBe("architect")
+
+    applyDirectoryEvent({
+      event: { type: "modelpick.replied", properties: { sessionID, requestID: "mpk_2" } },
+      store,
+      setStore,
+      push() {},
+      directory: "/tmp",
+      loadLsp() {},
+    })
+    expect(store.modelpick[sessionID]?.map((x) => x.id)).toEqual(["mpk_1", "mpk_3"])
   })
 
   test("updates vcs branch in store and cache", () => {

@@ -46,6 +46,8 @@ export function hints(template: string) {
 export const Default = {
   INIT: "init",
   REVIEW: "review",
+  ADVICE: "advice",
+  ADVISOR_MODEL: "advisormodel",
 } as const
 
 export interface Interface {
@@ -85,6 +87,24 @@ const layer = Layer.effect(
         },
         subtask: true,
         hints: hints(PROMPT_REVIEW),
+      }
+      commands[Default.ADVICE] = {
+        name: Default.ADVICE,
+        description: "ask the senior advisor to review the current task and next steps",
+        source: "command",
+        get template() {
+          return "Review the current task and provide strategic, read-only advice."
+        },
+        hints: [],
+      }
+      commands[Default.ADVISOR_MODEL] = {
+        name: Default.ADVISOR_MODEL,
+        description: "set the model the advisor uses (provider/model), or clear it with 'default'",
+        source: "command",
+        get template() {
+          return ""
+        },
+        hints: [],
       }
 
       for (const [name, command] of Object.entries(cfg.command ?? {})) {

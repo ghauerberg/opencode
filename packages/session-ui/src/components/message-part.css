@@ -1145,6 +1145,84 @@
   }
 }
 
+[data-component="dock-prompt"][data-kind="modelpick"] {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  gap: 0;
+  min-height: 0;
+  max-height: var(--modelpick-prompt-max-height, 100dvh);
+
+  [data-slot="modelpick-body"] {
+    display: flex;
+    flex-direction: column;
+    gap: 16px;
+    flex: 1;
+    min-height: 0;
+    padding: 8px 8px 0;
+  }
+
+  [data-slot="modelpick-header"] {
+    padding: 0 10px;
+  }
+
+  [data-slot="modelpick-header-title"] {
+    font-family: var(--font-family-sans);
+    font-size: 14px;
+    font-weight: var(--font-weight-medium);
+    line-height: var(--line-height-large);
+    color: var(--v2-text-text-base);
+    min-width: 0;
+  }
+
+  [data-slot="modelpick-content"] {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+    flex: 1;
+    min-height: 0;
+  }
+
+  [data-slot="modelpick-text"] {
+    font-family: var(--font-family-sans);
+    font-size: 14px;
+    font-weight: var(--font-weight-regular);
+    line-height: var(--line-height-large);
+    color: var(--v2-text-text-muted);
+    padding: 0 10px;
+    flex-shrink: 0;
+  }
+
+  [data-slot="modelpick-list"] {
+    display: flex;
+    flex-direction: column;
+    flex: 1 1 auto;
+    min-height: 0;
+    margin-top: 8px;
+    padding: 0 1px 16px;
+  }
+
+  [data-slot="modelpick-footer"] {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    flex-shrink: 0;
+    padding: 32px 8px 8px;
+    margin-top: -24px;
+  }
+
+  [data-slot="modelpick-footer-actions"] {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+
+    [data-component="button"] {
+      padding-left: 12px;
+      padding-right: 12px;
+    }
+  }
+}
+
 [data-component="question-minimized-dock"] {
   margin-bottom: 8px;
 
@@ -1546,6 +1624,16 @@ body:not([data-new-layout]) {
       &:focus-visible {
         outline: 1px solid var(--border-interactive-base);
       }
+    }
+  }
+
+  [data-component="dock-prompt"][data-kind="modelpick"] {
+    [data-slot="modelpick-header-title"] {
+      color: var(--text-strong);
+    }
+
+    [data-slot="modelpick-text"] {
+      color: var(--text-weak);
     }
   }
 

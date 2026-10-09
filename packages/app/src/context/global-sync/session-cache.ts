@@ -1,4 +1,12 @@
-import type { Message, Part, PermissionRequest, QuestionRequest, SessionStatus, Todo } from "@opencode-ai/sdk/v2/client"
+import type {
+  Message,
+  ModelPickRequest,
+  Part,
+  PermissionRequest,
+  QuestionRequest,
+  SessionStatus,
+  Todo,
+} from "@opencode-ai/sdk/v2/client"
 import type { FileDiffInfo } from "@opencode-ai/client/promise"
 import type { SessionMessageInfo } from "@opencode-ai/client/promise"
 
@@ -13,6 +21,7 @@ type SessionCache = {
   part: Record<string, Part[] | undefined>
   permission: Record<string, PermissionRequest[] | undefined>
   question: Record<string, QuestionRequest[] | undefined>
+  modelpick: Record<string, ModelPickRequest[] | undefined>
   part_text_accum_delta: Record<string, string | undefined>
 }
 
@@ -37,6 +46,7 @@ export function dropSessionCaches(store: SessionCache, sessionIDs: Iterable<stri
     delete store.session_status[sessionID]
     delete store.permission[sessionID]
     delete store.question[sessionID]
+    delete store.modelpick[sessionID]
   }
 }
 

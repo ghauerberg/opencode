@@ -1,6 +1,6 @@
 import { createEffect, createMemo, on, onCleanup } from "solid-js"
 import { createStore } from "solid-js/store"
-import type { PermissionRequest, QuestionRequest, Todo } from "@opencode-ai/sdk/v2"
+import type { ModelPickRequest, PermissionRequest, QuestionRequest, Todo } from "@opencode-ai/sdk/v2"
 import { useParams } from "@solidjs/router"
 import { showToast } from "@/utils/toast"
 import { useServerSync } from "@/context/server-sync"
@@ -8,7 +8,7 @@ import { useLanguage } from "@/context/language"
 import { usePermission } from "@/context/permission"
 import { useSDK } from "@/context/sdk"
 import { useSync } from "@/context/sync"
-import { sessionPermissionRequest, sessionQuestionRequest } from "./session-request-tree"
+import { sessionModelPickRequest, sessionPermissionRequest, sessionQuestionRequest } from "./session-request-tree"
 
 export const todoState = (input: {
   count: number
@@ -43,10 +43,14 @@ export function createSessionComposerController(options?: { closeMs?: number | (
     })
   })
 
+  const modelPickRequest = createMemo((): ModelPickRequest | undefined => {
+    return sessionModelPickRequest(sync().data.session, sync().data.modelpick, params.id)
+  })
+
   const blocked = createMemo(() => {
     const id = params.id
     if (!id) return false
-    return !!permissionRequest() || !!questionRequest()
+    return !!permissionRequest() || !!questionRequest() || !!modelPickRequest()
   })
 
   const todos = createMemo((): Todo[] => {
@@ -89,6 +93,50 @@ export function createSessionComposerController(options?: { closeMs?: number | (
       })
       .finally(() => {
         setStore("responding", (id) => (id === perm.id ? undefined : id))
+      })
+  }
+
+  const modelPickResponding = createMemo(() => {
+    const pick = modelPickRequest()
+    if (!pick) return false
+    return store.responding === pick.id
+  })
+
+  const replyModelPick = (model: { providerID: string; modelID: string }) => {
+    const pick = modelPickRequest()
+    if (!pick) return
+    if (store.responding === pick.id) return
+
+    setStore("responding", pick.id)
+    sdk()
+      .client.modelpick.reply({
+        requestID: pick.id,
+        directory: sdk().directory,
+        modelPickReplyPayload: { providerID: model.providerID, modelID: model.modelID },
+      })
+      .catch((err: unknown) => {
+        const description = err instanceof Error ? err.message : String(err)
+        showToast({ title: language.t("common.requestFailed"), description })
+      })
+      .finally(() => {
+        setStore("responding", (id) => (id === pick.id ? undefined : id))
+      })
+  }
+
+  const rejectModelPick = () => {
+    const pick = modelPickRequest()
+    if (!pick) return
+    if (store.responding === pick.id) return
+
+    setStore("responding", pick.id)
+    sdk()
+      .client.modelpick.reject({ requestID: pick.id, directory: sdk().directory })
+      .catch((err: unknown) => {
+        const description = err instanceof Error ? err.message : String(err)
+        showToast({ title: language.t("common.requestFailed"), description })
+      })
+      .finally(() => {
+        setStore("responding", (id) => (id === pick.id ? undefined : id))
       })
   }
 
@@ -189,8 +237,12 @@ export function createSessionComposerController(options?: { closeMs?: number | (
     blocked,
     questionRequest,
     permissionRequest,
+    modelPickRequest,
     permissionResponding,
+    modelPickResponding,
     decide,
+    replyModelPick,
+    rejectModelPick,
     todos,
     dock: () =>
       store.sessionID === params.id
