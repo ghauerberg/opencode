@@ -23,6 +23,10 @@ export const Info = Schema.Struct({
   stepTools: Schema.optional(Schema.mutable(Schema.Array(Schema.String))).annotate({
     description: "Tool ids that count as a meaningful step toward the automatic review allowance.",
   }),
+  history: Schema.optional(Schema.Literals(["compacted", "full"])).annotate({
+    description:
+      "Which conversation history the advisor reviews. 'compacted' (default) matches the primary agent's visible view: everything since the last compaction with the summary standing in for earlier work. 'full' sends the entire uncompacted transcript, which can exceed the model's context window.",
+  }),
   failMode: Schema.optional(Schema.Literals(["continue", "pause"])).annotate({
     description: "What to do when a review fails. 'continue' keeps the worker going (default), 'pause' stops it.",
   }),

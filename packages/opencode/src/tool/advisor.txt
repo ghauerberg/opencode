@@ -2,6 +2,8 @@ Ask a senior reasoning advisor to review the current task, progress, technical a
 
 Use this when you are uncertain about architecture, stuck on a problem, or want an independent technical review.
 
-The advisor reviews the session as read-only, builds a compact brief of what you are doing, and returns structured advice (continue / adjust / redirect / recover / escalate) with concrete recommended actions.
+The advisor reviews the session as read-only, reads the visible conversation transcript (since the last compaction), and returns structured advice (continue / adjust / redirect / recover / escalate) with concrete recommended actions.
+
+Use this for a whole-session strategic review. To escalate one specific subproblem to a named advisory role instead, use the `consult` tool.
 
 The advisor does not implement changes. Recommendations are advisory only; you remain in control.

@@ -20,6 +20,9 @@ import { Advisor } from "./schema"
 const DEFAULT_ALLOWANCE = 50
 const DEFAULT_STEP_TOOLS = ["read", "write", "edit", "bash", "grep", "glob"]
 
+// Session metadata key holding the durable advisor state (see Advisor.Persisted).
+const STATE_METADATA_KEY = "advisorState"
+
 export class AdvisorError extends Schema.TaggedErrorClass<AdvisorError>()("AdvisorError", {
   message: Schema.String,
 }) {}
@@ -171,6 +174,33 @@ const layer = Layer.effect(
       }),
     )
 
+    // Read the durable advisor state from session metadata, falling back to the
+    // in-memory cache. Malformed metadata is ignored rather than failing the
+    // session, so a corrupted key can never wedge the advisor.
+    const readState = Effect.fnUntraced(function* (sessionID: SessionID) {
+      const map = yield* InstanceState.get(state)
+      const cached = map.get(sessionID)
+      if (cached) return cached
+      const info = yield* sessions.get(sessionID).pipe(Effect.orDie)
+      const decoded = Schema.decodeUnknownOption(Advisor.Persisted)(info.metadata?.[STATE_METADATA_KEY])
+      if (decoded._tag === "None") return { ...Advisor.defaultState }
+      const restored = Advisor.fromPersisted(decoded.value)
+      map.set(sessionID, restored)
+      return restored
+    })
+
+    // Persist the durable subset (never `advisorRunning`) into session metadata.
+    // Best-effort: a metadata write failure must not fail the review itself.
+    const writeState = Effect.fnUntraced(function* (sessionID: SessionID, next: Advisor.State) {
+      const info = yield* sessions.get(sessionID).pipe(Effect.orDie)
+      yield* sessions
+        .setMetadata({
+          sessionID,
+          metadata: { ...(info.metadata ?? {}), [STATE_METADATA_KEY]: Advisor.toPersisted(next) },
+        })
+        .pipe(Effect.ignore)
+    })
+
     const settings = Effect.fnUntraced(function* () {
       const cfg = yield* config.get()
       const advisorCfg = cfg.advisor ?? {}
@@ -179,8 +209,9 @@ const layer = Layer.effect(
       const every = advisorCfg.automatic?.every ?? DEFAULT_ALLOWANCE
       const automaticEnabled = advisorCfg.automatic?.enabled ?? true
       const stepTools = advisorCfg.stepTools ?? DEFAULT_STEP_TOOLS
+      const history = advisorCfg.history ?? "compacted"
       const failMode = advisorCfg.failMode ?? "continue"
-      return { enabled, agentName, every, automaticEnabled, stepTools, failMode }
+      return { enabled, agentName, every, automaticEnabled, stepTools, history, failMode }
     })
 
     const getConfiguredModel: Interface["getConfiguredModel"] = Effect.fn("Advisor.getConfiguredModel")(function* (
@@ -247,7 +278,7 @@ const layer = Layer.effect(
       }
 
       const map = yield* InstanceState.get(state)
-      const current = map.get(input.sessionID) ?? { ...Advisor.defaultState }
+      const current = yield* readState(input.sessionID)
       if (current.advisorRunning) {
         return yield* new AdvisorError({ message: "An advisor review is already running for this session" })
       }
@@ -269,10 +300,12 @@ const layer = Layer.effect(
             providerID: ProviderV2.ID.make(parent.model?.providerID ?? "unknown"),
           }
 
-        // The advisor sees the same visible history the main loop gives the model:
-        // everything since the last compaction, with the compaction summary standing
-        // in for earlier work. Never serialize the full pre-compaction archive here.
-        const history = yield* MessageV2.filterCompactedEffect(input.sessionID).pipe(
+        // The advisor normally sees the same visible history the main loop gives
+        // the model: everything since the last compaction, with the compaction
+        // summary standing in for earlier work. `advisor.history: "full"` opts
+        // into the entire uncompacted transcript instead, which can exceed the
+        // model's context window.
+        const history = yield* (s.history === "full" ? MessageV2.stream(input.sessionID) : MessageV2.filterCompactedEffect(input.sessionID)).pipe(
           Effect.provideService(Database.Service, database),
         )
         const permission: PermissionV1.Ruleset = [
@@ -338,13 +371,15 @@ const layer = Layer.effect(
           createdAt: Date.now(),
         }
         const reviews = [review, ...current.history].slice(0, 3)
-        map.set(input.sessionID, {
+        const nextState: Advisor.State = {
           steps: 0,
           cycle,
           lastReview: review,
           history: reviews,
           advisorRunning: false,
-        })
+        }
+        map.set(input.sessionID, nextState)
+        yield* writeState(input.sessionID, nextState)
         return review
       } catch (error) {
         const entry = map.get(input.sessionID)
@@ -367,20 +402,19 @@ const layer = Layer.effect(
       if (!s.stepTools.includes(input.tool)) return
 
       const map = yield* InstanceState.get(state)
-      const current = map.get(input.sessionID) ?? { ...Advisor.defaultState }
+      const current = yield* readState(input.sessionID)
       if (current.advisorRunning) return
       map.set(input.sessionID, { ...current, steps: current.steps + 1 })
     })
 
     const reset: Interface["reset"] = Effect.fn("Advisor.reset")(function* (sessionID: SessionID) {
       const map = yield* InstanceState.get(state)
-      const current = map.get(sessionID) ?? { ...Advisor.defaultState }
+      const current = yield* readState(sessionID)
       map.set(sessionID, { ...current, steps: 0 })
     })
 
     const getState: Interface["getState"] = Effect.fn("Advisor.getState")(function* (sessionID: SessionID) {
-      const map = yield* InstanceState.get(state)
-      return map.get(sessionID) ?? { ...Advisor.defaultState }
+      return yield* readState(sessionID)
     })
 
     const maybeAutoReview: Interface["maybeAutoReview"] = Effect.fn("Advisor.maybeAutoReview")(function* (input: {
@@ -395,7 +429,7 @@ const layer = Layer.effect(
       if (s.agentName === input.agent) return "none" as const
 
       const map = yield* InstanceState.get(state)
-      const current = map.get(input.sessionID) ?? { ...Advisor.defaultState }
+      const current = yield* readState(input.sessionID)
       if (current.advisorRunning) return "none" as const
       if (current.steps < s.every) return "none" as const
 
@@ -411,7 +445,9 @@ const layer = Layer.effect(
         // Restart the step counter so the automatic review retries after the
         // next full step window instead of re-triggering on every subsequent
         // step until it happens to succeed.
-        map.set(input.sessionID, { ...(map.get(input.sessionID) ?? current), steps: 0, advisorRunning: false })
+        const resetState = { ...(map.get(input.sessionID) ?? current), steps: 0, advisorRunning: false }
+        map.set(input.sessionID, resetState)
+        yield* writeState(input.sessionID, resetState)
         if (s.failMode === "pause") {
           yield* Effect.logWarning("auto advisor review failed, pausing session", {
             "session.id": input.sessionID,

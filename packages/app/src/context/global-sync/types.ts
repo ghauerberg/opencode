@@ -3,6 +3,7 @@ import type {
   Config,
   LspStatus,
   Message,
+  ModelPickRequest,
   Part,
   Path,
   PermissionRequest,
@@ -59,6 +60,9 @@ export type State = {
   }
   question: {
     [sessionID: string]: QuestionRequest[]
+  }
+  modelpick: {
+    [sessionID: string]: ModelPickRequest[]
   }
   mcp_ready: boolean
   mcp: {

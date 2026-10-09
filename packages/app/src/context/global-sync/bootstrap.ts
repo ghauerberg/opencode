@@ -1,5 +1,6 @@
 import type {
   Config,
+  ModelPickRequest,
   OpencodeClient,
   Path,
   PermissionRequest,
@@ -512,6 +513,40 @@ export async function bootstrapDirectory(input: {
               }),
             )
           }),
+        ),
+      () =>
+        retry(() =>
+          input.sdk.modelpick
+            .list({ directory: input.directory })
+            .then((result) => result.data)
+            .then((requests) => {
+              const ids = requests.map((request) => request.sessionID)
+              const grouped = groupBySession(
+                requests.filter((request) => !!request.id && !!request.sessionID) as ModelPickRequest[],
+              )
+              const warm = input.session
+                ? Promise.all(ids.map((sessionID) => input.session!.resolve(sessionID))).then(() => undefined)
+                : warmSessions({ ids, store: input.store, setStore: input.setStore, api: input.api.session })
+              return warm.then(() =>
+                batch(() => {
+                  const current = input.session?.data.modelpick ?? input.store.modelpick
+                  for (const sessionID of Object.keys(current)) {
+                    if (grouped[sessionID]) continue
+                    if (input.session?.get(sessionID)?.directory !== input.directory) continue
+                    if (input.session) input.session.set("modelpick", sessionID, [])
+                    if (!input.session) input.setStore("modelpick", sessionID, [])
+                  }
+                  for (const [sessionID, requests] of Object.entries(grouped)) {
+                    const value = reconcile(
+                      requests.filter((request) => !!request?.id).sort((a, b) => cmp(a.id, b.id)),
+                      { key: "id" },
+                    )
+                    if (input.session) input.session.set("modelpick", sessionID, value)
+                    if (!input.session) input.setStore("modelpick", sessionID, value)
+                  }
+                }),
+              )
+            }),
         ),
       () => Promise.resolve(input.loadSessions(input.directory)),
       input.mcp &&

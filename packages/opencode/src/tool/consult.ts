@@ -22,6 +22,12 @@ import { pathToFileURL } from "url"
 
 const id = "consult"
 
+// Two advisory mechanisms coexist deliberately. This `consult` tool escalates a
+// single subproblem to a named advisory role and returns structured, per-role
+// advice; the `advisor_review` tool (src/tool/advisor.ts) runs a whole-session
+// strategic review. Both share the read-only child-session contract and the
+// ModelPickStore role→model map, but neither is a superset of the other.
+
 const Confidence = Schema.Finite.check(Schema.isGreaterThanOrEqualTo(0)).check(Schema.isLessThanOrEqualTo(1))
 
 const Evidence = Schema.Struct({

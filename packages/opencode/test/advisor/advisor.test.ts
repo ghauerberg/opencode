@@ -93,6 +93,107 @@ const seed = Effect.fn("AdvisorTest.seed")(function* () {
   return { chat, assistant }
 })
 
+function assistantMessage(input: {
+  sessionID: SessionID
+  parentID: MessageID
+  created?: number
+  summary?: boolean
+}): SessionV1.Assistant {
+  return {
+    id: MessageID.ascending(),
+    role: "assistant",
+    parentID: input.parentID,
+    sessionID: input.sessionID,
+    mode: "build",
+    agent: "build",
+    cost: 0,
+    path: { cwd: "/tmp", root: "/tmp" },
+    tokens: { input: 0, output: 0, reasoning: 0, cache: { read: 0, write: 0 } },
+    modelID: ref.modelID,
+    providerID: ref.providerID,
+    time: { created: input.created ?? Date.now() },
+    finish: "stop",
+    ...(input.summary ? { summary: true } : {}),
+  }
+}
+
+// Seeds a compacted session the way the primary loop does: an early turn that
+// compaction hides, a retained tail, the compaction marker + summary, then fresh
+// post-compaction work.
+const seedCompaction = Effect.fn("AdvisorTest.seedCompaction")(function* (sessionID: SessionID) {
+  const sessions = yield* Session.Service
+
+  const earlyUser = yield* sessions.updateMessage({
+    id: MessageID.ascending(),
+    role: "user",
+    sessionID,
+    agent: "build",
+    model: ref,
+    time: { created: Date.now() },
+  })
+  yield* sessions.updatePart({
+    id: PartID.ascending(),
+    messageID: earlyUser.id,
+    sessionID,
+    type: "text",
+    text: "PRE-COMPACTION DETAIL",
+  })
+  yield* sessions.updateMessage(assistantMessage({ sessionID, parentID: earlyUser.id }))
+
+  const tailUser = yield* sessions.updateMessage({
+    id: MessageID.ascending(),
+    role: "user",
+    sessionID,
+    agent: "build",
+    model: ref,
+    time: { created: Date.now() },
+  })
+  yield* sessions.updatePart({
+    id: PartID.ascending(),
+    messageID: tailUser.id,
+    sessionID,
+    type: "text",
+    text: "Retained tail prompt",
+  })
+
+  const compactionUser = yield* sessions.updateMessage({
+    id: MessageID.ascending(),
+    role: "user",
+    sessionID,
+    agent: "build",
+    model: ref,
+    time: { created: Date.now() },
+  })
+  yield* sessions.updatePart({
+    id: PartID.ascending(),
+    messageID: compactionUser.id,
+    sessionID,
+    type: "compaction",
+    auto: true,
+    tail_start_id: tailUser.id,
+  })
+  yield* sessions.updateMessage(
+    assistantMessage({ sessionID, parentID: compactionUser.id, summary: true }),
+  )
+
+  const postUser = yield* sessions.updateMessage({
+    id: MessageID.ascending(),
+    role: "user",
+    sessionID,
+    agent: "build",
+    model: ref,
+    time: { created: Date.now() },
+  })
+  yield* sessions.updatePart({
+    id: PartID.ascending(),
+    messageID: postUser.id,
+    sessionID,
+    type: "text",
+    text: "Post-compaction work",
+  })
+  yield* sessions.updateMessage(assistantMessage({ sessionID, parentID: postUser.id }))
+})
+
 function reply(input: Parameters<TaskPromptOps["prompt"]>[0], text: string): SessionV1.WithParts {
   const id = MessageID.ascending()
   return {
@@ -173,6 +274,16 @@ const advisorConfig = {
     advisor: {
       automatic: { every: 3 },
       stepTools: ["read", "write", "edit", "bash", "grep", "glob"],
+    },
+  },
+}
+
+const fullHistoryConfig = {
+  config: {
+    advisor: {
+      automatic: { every: 3 },
+      stepTools: ["read", "write", "edit", "bash", "grep", "glob"],
+      history: "full" as const,
     },
   },
 }
@@ -523,6 +634,52 @@ describe("advisor", () => {
   )
 
   it.instance(
+    "history 'compacted' (default) hides pre-compaction work from the advisor",
+    () =>
+      Effect.gen(function* () {
+        const advisor = yield* Advisor.Service
+        const { chat } = yield* seed()
+        yield* seedCompaction(chat.id)
+
+        let transcript = ""
+        yield* advisor.runAdvisorReview({
+          sessionID: chat.id,
+          trigger: "user",
+          promptOps: stubOpsWithCapture("advice", (input) => {
+            transcript = input.parts.map((part) => (part.type === "text" ? part.text : "")).join("\n")
+          }),
+        })
+
+        expect(transcript).toContain("Post-compaction work")
+        expect(transcript).not.toContain("PRE-COMPACTION DETAIL")
+      }),
+    advisorConfig,
+  )
+
+  it.instance(
+    "history 'full' sends the entire transcript, including pre-compaction work",
+    () =>
+      Effect.gen(function* () {
+        const advisor = yield* Advisor.Service
+        const { chat } = yield* seed()
+        yield* seedCompaction(chat.id)
+
+        let transcript = ""
+        yield* advisor.runAdvisorReview({
+          sessionID: chat.id,
+          trigger: "user",
+          promptOps: stubOpsWithCapture("advice", (input) => {
+            transcript = input.parts.map((part) => (part.type === "text" ? part.text : "")).join("\n")
+          }),
+        })
+
+        expect(transcript).toContain("PRE-COMPACTION DETAIL")
+        expect(transcript).toContain("Post-compaction work")
+      }),
+    fullHistoryConfig,
+  )
+
+  it.instance(
     "advisor_review tool is registered",
     () =>
       Effect.gen(function* () {
@@ -754,5 +911,91 @@ describe("advisor", () => {
         },
       },
     },
+  )
+
+  it.instance(
+    "persists the review cycle into session metadata without the transient running flag",
+    () =>
+      Effect.gen(function* () {
+        const advisor = yield* Advisor.Service
+        const sessions = yield* Session.Service
+        const { chat } = yield* seed()
+        for (let index = 0; index < 3; index++)
+          yield* advisor.step({ sessionID: chat.id, tool: "read", agent: "build" })
+
+        yield* advisor.maybeAutoReview({
+          sessionID: chat.id,
+          agent: "build",
+          model: ref,
+          promptOps: stubOps(advisorText),
+        })
+
+        const info = yield* sessions.get(chat.id).pipe(Effect.orDie)
+        const persisted = info.metadata?.advisorState as
+          | { cycle: number; steps: number; history: unknown[]; advisorRunning?: unknown }
+          | undefined
+        expect(persisted).toBeDefined()
+        expect(persisted?.cycle).toBe(1)
+        expect(persisted?.steps).toBe(0)
+        expect(persisted?.history).toHaveLength(1)
+        // `advisorRunning` is transient and must never be persisted.
+        expect(persisted?.advisorRunning).toBeUndefined()
+      }),
+    advisorConfig,
+  )
+
+  it.instance(
+    "restores the review cycle from session metadata after a restart",
+    () =>
+      Effect.gen(function* () {
+        const advisor = yield* Advisor.Service
+        const sessions = yield* Session.Service
+        const { chat } = yield* seed()
+
+        // Simulate a process restart: no in-memory state for this session, but
+        // durable state already stored in metadata.
+        yield* sessions.setMetadata({
+          sessionID: chat.id,
+          metadata: {
+            advisorState: {
+              steps: 2,
+              cycle: 4,
+              history: [
+                {
+                  sessionID: chat.id,
+                  trigger: "automatic",
+                  cycle: 4,
+                  response: "Restored advice",
+                  createdAt: 1,
+                },
+              ],
+            },
+          },
+        })
+
+        const restored = yield* advisor.getState(chat.id)
+        expect(restored.cycle).toBe(4)
+        expect(restored.steps).toBe(2)
+        expect(restored.history).toHaveLength(1)
+        expect(restored.advisorRunning).toBe(false)
+      }),
+    advisorConfig,
+  )
+
+  it.instance(
+    "ignores malformed persisted advisor state instead of failing",
+    () =>
+      Effect.gen(function* () {
+        const advisor = yield* Advisor.Service
+        const sessions = yield* Session.Service
+        const { chat } = yield* seed()
+        yield* sessions.setMetadata({ sessionID: chat.id, metadata: { advisorState: { cycle: "nope" } } })
+
+        const state = yield* advisor.getState(chat.id)
+        expect(state.cycle).toBe(0)
+        expect(state.steps).toBe(0)
+        expect(state.history).toHaveLength(0)
+      }),
+    advisorConfig,
   )
 })

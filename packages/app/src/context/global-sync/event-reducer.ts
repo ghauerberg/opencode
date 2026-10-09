@@ -2,6 +2,7 @@ import { Binary } from "@opencode-ai/core/util/binary"
 import { produce, reconcile, type SetStoreFunction, type Store } from "solid-js/store"
 import type {
   Message,
+  ModelPickRequest,
   Part,
   PermissionRequest,
   Project,
@@ -32,6 +33,9 @@ const SESSION_CONTENT_EVENTS = new Set([
   "question.asked",
   "question.replied",
   "question.rejected",
+  "modelpick.asked",
+  "modelpick.replied",
+  "modelpick.rejected",
 ])
 
 export function applyGlobalEvent(input: {
@@ -90,6 +94,7 @@ export function cleanupDroppedSessionCaches(
     ...Object.keys(store.todo),
     ...Object.keys(store.permission),
     ...Object.keys(store.question),
+    ...Object.keys(store.modelpick),
     ...Object.keys(store.session_status),
     ...Object.values(store.part)
       .map((parts) => parts?.find((part) => !!part?.sessionID)?.sessionID)
@@ -460,6 +465,43 @@ export function applyDirectoryEvent(input: {
       if (!result.found) break
       input.setStore(
         "question",
+        props.sessionID,
+        produce((draft) => {
+          draft.splice(result.index, 1)
+        }),
+      )
+      break
+    }
+    case "modelpick.asked": {
+      const request = event.properties as ModelPickRequest
+      const requests = input.store.modelpick[request.sessionID]
+      if (!requests) {
+        input.setStore("modelpick", request.sessionID, [request])
+        break
+      }
+      const result = Binary.search(requests, request.id, (r) => r.id)
+      if (result.found) {
+        input.setStore("modelpick", request.sessionID, result.index, reconcile(request))
+        break
+      }
+      input.setStore(
+        "modelpick",
+        request.sessionID,
+        produce((draft) => {
+          draft.splice(result.index, 0, request)
+        }),
+      )
+      break
+    }
+    case "modelpick.replied":
+    case "modelpick.rejected": {
+      const props = event.properties as { sessionID: string; requestID: string }
+      const requests = input.store.modelpick[props.sessionID]
+      if (!requests) break
+      const result = Binary.search(requests, props.requestID, (r) => r.id)
+      if (!result.found) break
+      input.setStore(
+        "modelpick",
         props.sessionID,
         produce((draft) => {
           draft.splice(result.index, 1)

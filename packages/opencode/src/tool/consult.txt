@@ -8,7 +8,7 @@ Call this tool when:
 - A test, error, or observed behavior contradicts your understanding.
 - You have spent several steps without meaningful progress.
 
-Do NOT call this tool to delegate ordinary implementation work; that is the `task` tool. `consult` returns advice only, and the advisor cannot edit files.
+Do NOT call this tool to delegate ordinary implementation work; that is the `task` tool. `consult` returns advice only, and the advisor cannot edit files. For a whole-session strategic review rather than a single subproblem, use the `advisor_review` tool.
 
 Fields:
 - `role`: the name of the advisory agent to escalate to (e.g. "architect").
